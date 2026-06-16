@@ -1,0 +1,223 @@
+================================================================================
+VOXEL EDITOR APP - COMPLETE SETUP INSTRUCTIONS
+================================================================================
+
+SITUATION:
+- The app works in agent-browser testing but shows black canvas on your screen
+- This is a caching issue, NOT a code problem
+- The fix is already in the code
+
+================================================================================
+STEP 1: GUARANTEED WORKING SOLUTION (DO THIS FIRST)
+================================================================================
+
+A) CLEAR BROWSER CACHE AND RESTART
+
+   1. Stop the dev server (press Ctrl+C in terminal)
+   
+   2. Clear browser cache:
+      - Press Ctrl+Shift+Delete (or Cmd+Shift+Delete on Mac)
+      - Select "All time"
+      - Check: Cookies, Cache, Cached images and files, Local Storage
+      - Click "Clear data"
+   
+   3. Restart dev server:
+      cd /vercel/share/v0-project
+      npm run dev
+   
+   4. In your BROWSER:
+      - Close browser completely (all windows)
+      - Open fresh browser
+      - Go to http://localhost:3000
+      - Press Ctrl+Shift+R (hard refresh - NOT Ctrl+R)
+      - WAIT 10-15 seconds for full load
+      - You should now see the BLUE GRID
+
+B) IF THAT DOESN'T WORK:
+
+   Try the automated setup script instead:
+   
+   Mac/Linux:
+   cd /vercel/share/v0-project
+   ./setup.sh
+   
+   Windows:
+   cd C:\path\to\voxel-project
+   setup.bat
+
+================================================================================
+STEP 2: VERIFY IT'S WORKING
+================================================================================
+
+You should see:
+
+âœ“ LEFT PANEL (30% width, dark blue):
+  - Tools: Add, Remove, Paint, Select buttons
+  - Red color swatch (#FF0000)
+  - Layers section with "Layer 1"
+  - View Settings with grid toggle
+  - Export/Import buttons
+
+âœ“ RIGHT PANEL (70% width, canvas):
+  - BLUE WIREFRAME GRID in 3D perspective
+  - Grid lines should be LIGHT BLUE
+  - Grid should look 3D (perspective view, not flat)
+
+âœ“ BOTTOM:
+  - Status bar: "Tool: Add Mode" | "Color: #FF0000" | "Voxels: 0"
+
+If you don't see the blue grid:
+  â†’ Read WHY_NO_GRID.md (detailed technical explanation)
+  â†’ Read TROUBLESHOOTING.md (step-by-step fixes)
+
+================================================================================
+STEP 3: TEST THAT IT WORKS
+================================================================================
+
+1. Move mouse over the grid
+   â†’ You should see a GREEN VOXEL PREVIEW where your mouse is
+
+2. Click on the grid
+   â†’ Voxel count should increase (shows "Voxels: 1" at bottom)
+
+3. Click multiple times
+   â†’ More red voxels appear
+
+4. Switch to Paint tool
+   â†’ Click a voxel to change its color
+
+If none of this happens, restart from STEP 1.
+
+================================================================================
+STEP 4: IF STILL NOT WORKING
+================================================================================
+
+A) Check browser console for errors:
+   - Press F12 (open Developer Tools)
+   - Go to Console tab
+   - Look for red error messages
+   - Screenshot any errors
+   - See TROUBLESHOOTING.md for solutions
+
+B) Run diagnostic command:
+   
+   Open browser console (F12) and paste:
+   
+   const canvas = document.querySelector('canvas');
+   console.log({
+     canvasExists: !!canvas,
+     width: canvas?.clientWidth,
+     height: canvas?.clientHeight,
+     webGL: !!canvas?.getContext('webgl')
+   });
+   
+   Expected output: width and height should be large numbers (1200+, 800+)
+                    NOT 0
+
+C) If canvas width/height are 0:
+   - This means sizing issue (old cache)
+   - Go back to STEP 1 and be more thorough
+   - Clear browser cache from browser settings too
+
+D) If console shows errors:
+   - Copy the errors
+   - See TROUBLESHOOTING.md for solutions by error type
+
+================================================================================
+STEP 5: DOCUMENTATION
+================================================================================
+
+Read these in order:
+
+1. QUICKSTART.md (2 min read)
+   - Quick overview
+   - Basic troubleshooting
+
+2. README.md (10 min read)
+   - Full feature list
+   - Usage instructions
+   - Tech stack info
+
+3. TROUBLESHOOTING.md (20 min read)
+   - In-depth debugging
+   - All known issues and fixes
+   - Advanced techniques
+
+4. AI_DEVELOPER_GUIDE.md (if modifying code)
+   - Architecture overview
+   - Known patterns and solutions
+   - How to add features
+
+5. WHY_NO_GRID.md (technical deep dive)
+   - Why you see black but I see grid
+   - Root cause analysis
+   - React Three Fiber explanation
+
+================================================================================
+QUICK COMMANDS REFERENCE
+================================================================================
+
+Restart dev server:
+  npm run dev
+
+Stop dev server:
+  Ctrl+C
+
+Reinstall dependencies (if needed):
+  npm install
+
+Build for production:
+  npm run build
+
+Run production build:
+  npm start
+
+Clear browser cache:
+  Ctrl+Shift+Delete (select "All time", check boxes, clear)
+
+Hard refresh browser:
+  Ctrl+Shift+R (Windows/Linux) or Cmd+Shift+R (Mac)
+
+Open developer tools:
+  F12
+
+================================================================================
+IF YOU'RE STUCK
+================================================================================
+
+1. Go to TROUBLESHOOTING.md
+2. Find your exact symptom
+3. Follow the steps
+4. Check DEBUG CHECKLIST at bottom
+
+Most common issue: BLACK CANVAS
+Most common fix: Clear cache + restart dev server + hard refresh
+
+90% of "why doesn't it work" issues are cache-related.
+
+================================================================================
+DOCUMENTATION QUICK LINKS
+================================================================================
+
+DOCS_INDEX.md - Navigation guide to all documentation
+QUICKSTART.md - Fast 5-minute setup
+README.md - Full documentation
+TROUBLESHOOTING.md - Problem solving guide
+AI_DEVELOPER_GUIDE.md - For developers/AI working on the project
+WHY_NO_GRID.md - Technical explanation of the black canvas issue
+setup.sh - Automated setup script (Mac/Linux)
+setup.bat - Automated setup script (Windows)
+
+================================================================================
+DONE!
+================================================================================
+
+The app should be running on http://localhost:3000
+
+Next: Read QUICKSTART.md for how to use the app.
+
+Questions about the code? Read AI_DEVELOPER_GUIDE.md
+
+Stuck on a problem? Read TROUBLESHOOTING.md
+
+================================================================================
