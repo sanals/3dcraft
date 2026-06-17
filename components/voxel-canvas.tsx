@@ -7,9 +7,10 @@ import * as THREE from 'three';
 import { useVoxelStore } from '@/lib/voxel-store';
 import { refGeometryCache, setRefOpacity } from '@/lib/reference-loader';
 
-// Shared geometry/material created once, outside component to avoid recreation
 const BOX_GEO = new THREE.BoxGeometry(1, 1, 1);
 const HOVER_GEO = new THREE.BoxGeometry(1, 1, 1);
+
+const FACE_NAMES = ['right', 'left', 'top', 'bottom', 'front', 'back'] as const;
 
 function VoxelMesh({ orbitRef }: { orbitRef: React.MutableRefObject<any> }) {
   const meshRef = useRef<THREE.InstancedMesh>(null);
@@ -32,11 +33,72 @@ function VoxelMesh({ orbitRef }: { orbitRef: React.MutableRefObject<any> }) {
 
   // Stable material — created once
   const material = useMemo(
-    () =>
-      new THREE.MeshLambertMaterial({
+    () => {
+      const mat = new THREE.MeshLambertMaterial({
         color: '#ffffff',
         emissive: '#444444',
-      }),
+      });
+      mat.onBeforeCompile = (shader) => {
+        shader.vertexShader = `
+          attribute vec3 color_right;
+          attribute vec3 color_left;
+          attribute vec3 color_top;
+          attribute vec3 color_bottom;
+          attribute vec3 color_front;
+          attribute vec3 color_back;
+          
+          varying vec3 vFaceColorRight;
+          varying vec3 vFaceColorLeft;
+          varying vec3 vFaceColorTop;
+          varying vec3 vFaceColorBottom;
+          varying vec3 vFaceColorFront;
+          varying vec3 vFaceColorBack;
+          varying vec3 vInstanceNormal;
+        ` + shader.vertexShader;
+
+        shader.vertexShader = shader.vertexShader.replace(
+          '#include <color_vertex>',
+          `
+          #include <color_vertex>
+          vFaceColorRight = color_right;
+          vFaceColorLeft = color_left;
+          vFaceColorTop = color_top;
+          vFaceColorBottom = color_bottom;
+          vFaceColorFront = color_front;
+          vFaceColorBack = color_back;
+          vInstanceNormal = normal;
+          `
+        );
+
+        shader.fragmentShader = `
+          varying vec3 vFaceColorRight;
+          varying vec3 vFaceColorLeft;
+          varying vec3 vFaceColorTop;
+          varying vec3 vFaceColorBottom;
+          varying vec3 vFaceColorFront;
+          varying vec3 vFaceColorBack;
+          varying vec3 vInstanceNormal;
+        ` + shader.fragmentShader;
+
+        shader.fragmentShader = shader.fragmentShader.replace(
+          '#include <color_fragment>',
+          `
+          #include <color_fragment>
+          vec3 faceCol = diffuseColor.rgb;
+          
+          if (vInstanceNormal.x > 0.5 && vFaceColorRight.r >= 0.0) faceCol = vFaceColorRight;
+          else if (vInstanceNormal.x < -0.5 && vFaceColorLeft.r >= 0.0) faceCol = vFaceColorLeft;
+          else if (vInstanceNormal.y > 0.5 && vFaceColorTop.r >= 0.0) faceCol = vFaceColorTop;
+          else if (vInstanceNormal.y < -0.5 && vFaceColorBottom.r >= 0.0) faceCol = vFaceColorBottom;
+          else if (vInstanceNormal.z > 0.5 && vFaceColorFront.r >= 0.0) faceCol = vFaceColorFront;
+          else if (vInstanceNormal.z < -0.5 && vFaceColorBack.r >= 0.0) faceCol = vFaceColorBack;
+          
+          diffuseColor = vec4(faceCol, diffuseColor.a);
+          `
+        );
+      };
+      return mat;
+    },
     []
   );
 
@@ -48,6 +110,13 @@ function VoxelMesh({ orbitRef }: { orbitRef: React.MutableRefObject<any> }) {
       const colors = new Float32Array(250000 * 3).fill(1); // default white
       mesh.instanceColor = new THREE.InstancedBufferAttribute(colors, 3);
       mesh.instanceColor.needsUpdate = true;
+
+      // Add face color attributes
+      FACE_NAMES.forEach((face) => {
+        const faceColors = new Float32Array(250000 * 3).fill(-1); // -1 means use base color
+        mesh.geometry.setAttribute(`color_${face}`, new THREE.InstancedBufferAttribute(faceColors, 3));
+      });
+
       mesh.count = 0; // no visible instances yet
     }
   }, []);
@@ -86,6 +155,25 @@ function VoxelMesh({ orbitRef }: { orbitRef: React.MutableRefObject<any> }) {
     const tempColor = new THREE.Color();
     meshRef.current.count = voxels.length;
 
+    // Extract attributes
+    const faceAttrs = {
+      right: meshRef.current.geometry.attributes.color_right as THREE.InstancedBufferAttribute,
+      left: meshRef.current.geometry.attributes.color_left as THREE.InstancedBufferAttribute,
+      top: meshRef.current.geometry.attributes.color_top as THREE.InstancedBufferAttribute,
+      bottom: meshRef.current.geometry.attributes.color_bottom as THREE.InstancedBufferAttribute,
+      front: meshRef.current.geometry.attributes.color_front as THREE.InstancedBufferAttribute,
+      back: meshRef.current.geometry.attributes.color_back as THREE.InstancedBufferAttribute,
+    };
+
+    const setFaceColor = (attr: THREE.InstancedBufferAttribute, i: number, colorHex?: string) => {
+      if (colorHex) {
+        tempColor.set(colorHex);
+        attr.setXYZ(i, tempColor.r, tempColor.g, tempColor.b);
+      } else {
+        attr.setXYZ(i, -1, -1, -1);
+      }
+    };
+
     voxels.forEach((voxel, index) => {
       // +0.5 on all axes so each voxel sits INSIDE its grid cell,
       // then scale down by voxelSize so e.g. 4×4 = 16 voxels fit per grid square.
@@ -100,12 +188,20 @@ function VoxelMesh({ orbitRef }: { orbitRef: React.MutableRefObject<any> }) {
 
       tempColor.set(voxel.color);
       meshRef.current!.setColorAt(index, tempColor);
+      
+      FACE_NAMES.forEach((face) => {
+        setFaceColor(faceAttrs[face], index, voxel.faces?.[face]);
+      });
     });
 
     meshRef.current.instanceMatrix.needsUpdate = true;
     if (meshRef.current.instanceColor) {
       meshRef.current.instanceColor.needsUpdate = true;
     }
+    FACE_NAMES.forEach((face) => {
+      faceAttrs[face].needsUpdate = true;
+    });
+
     meshRef.current.computeBoundingSphere();
   }, [voxels, voxelSize]);
 
@@ -175,7 +271,7 @@ function VoxelMesh({ orbitRef }: { orbitRef: React.MutableRefObject<any> }) {
    * Used by paint/fill/remove tools that need to target a real block.
    */
   const computeVoxelHitPos = useCallback(
-    (ndc: THREE.Vector2): [number, number, number] | null => {
+    (ndc: THREE.Vector2): { pos: [number, number, number]; normal: [number, number, number] } | null => {
       raycaster.setFromCamera(ndc, camera);
       if (!meshRef.current || voxels.length === 0) return null;
 
@@ -184,7 +280,11 @@ function VoxelMesh({ orbitRef }: { orbitRef: React.MutableRefObject<any> }) {
       if (!validHit) return null;
 
       const voxel = voxels[validHit.instanceId!];
-      return [voxel.x, voxel.y, voxel.z];
+      const normal = validHit.face?.normal ?? new THREE.Vector3(0, 1, 0);
+      return {
+        pos: [voxel.x, voxel.y, voxel.z],
+        normal: [Math.round(normal.x), Math.round(normal.y), Math.round(normal.z)] as [number, number, number]
+      };
     },
     [camera, raycaster, voxels]
   );
@@ -214,27 +314,29 @@ function VoxelMesh({ orbitRef }: { orbitRef: React.MutableRefObject<any> }) {
         lastDrawnPos.current = posKey;
         addVoxel({ x, y, z, color: currentColor }, undefined, skipHistory);
       } else if (currentTool === 'remove') {
-        const pos = computeVoxelHitPos(ndc);
-        if (!pos) return;
-        const [x, y, z] = pos;
+        const hit = computeVoxelHitPos(ndc);
+        if (!hit) return;
+        const [x, y, z] = hit.pos;
         const posKey = `${x},${y},${z}`;
         if (skipHistory && lastDrawnPos.current === posKey) return;
         lastDrawnPos.current = posKey;
         removeVoxel(x, y, z, undefined, skipHistory);
       } else if (currentTool === 'paint') {
-        const pos = computeVoxelHitPos(ndc);
-        if (!pos) return;
-        const [x, y, z] = pos;
+        const hit = computeVoxelHitPos(ndc);
+        if (!hit) return;
+        const [x, y, z] = hit.pos;
+        const normal = hit.normal;
         const posKey = `${x},${y},${z}`;
         if (skipHistory && lastDrawnPos.current === posKey) return;
         lastDrawnPos.current = posKey;
-        paintVoxel(x, y, z, currentColor, undefined, skipHistory);
+        paintVoxel(x, y, z, normal, currentColor, undefined, skipHistory);
       } else if (currentTool === 'fill') {
         if (!skipHistory) {
-          const pos = computeVoxelHitPos(ndc);
-          if (!pos) return;
-          const [x, y, z] = pos;
-          fillVoxels(x, y, z, currentColor, undefined);
+          const hit = computeVoxelHitPos(ndc);
+          if (!hit) return;
+          const [x, y, z] = hit.pos;
+          const normal = hit.normal;
+          fillVoxels(x, y, z, normal, currentColor, undefined);
         }
       }
     },

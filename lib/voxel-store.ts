@@ -25,6 +25,14 @@ export interface Voxel {
   y: number;
   z: number;
   color: string;
+  faces?: {
+    top?: string;
+    bottom?: string;
+    right?: string;
+    left?: string;
+    front?: string;
+    back?: string;
+  };
 }
 
 export interface Layer {
@@ -73,8 +81,6 @@ export interface VoxelEditorState {
   layers: Layer[];
   activeLayerId: string | null;
   setCurrentColor: (color: string) => void;
-  setGridSize: (size: number) => void;
-  setVoxelSubdivision: (sub: number) => void;
   setShowGrid: (show: boolean) => void;
   setContinuousMode: (mode: boolean) => void;
   setSymmetry: (axis: 'x' | 'y' | 'z', value: boolean) => void;
@@ -89,9 +95,9 @@ export interface VoxelEditorState {
   // ── Voxels ────────────────────────────────────────────────────────────────
   addVoxel: (voxel: Voxel, layerId?: string, skipHistory?: boolean) => void;
   batchAddVoxels: (voxels: Voxel[], layerId?: string) => void;
-  fillVoxels: (startX: number, startY: number, startZ: number, color: string, layerId?: string) => void;
+  fillVoxels: (startX: number, startY: number, startZ: number, normal: [number, number, number] | null, color: string, layerId?: string) => void;
   removeVoxel: (x: number, y: number, z: number, layerId?: string, skipHistory?: boolean) => void;
-  paintVoxel: (x: number, y: number, z: number, color: string, layerId?: string, skipHistory?: boolean) => void;
+  paintVoxel: (x: number, y: number, z: number, normal: [number, number, number] | null, color: string, layerId?: string, skipHistory?: boolean) => void;
   getVoxelAt: (x: number, y: number, z: number, layerId?: string) => Voxel | undefined;
   /** Returns voxels from all *visible* layers combined. */
   getAllVoxels: () => Voxel[];
@@ -108,6 +114,8 @@ export interface VoxelEditorState {
   currentColor: string;
   currentTool: Tool;
   setCurrentTool: (tool: Tool) => void;
+  targetMode: 'block' | 'face';
+  setTargetMode: (mode: 'block' | 'face') => void;
 
   // ── Mass Placement & Symmetry ─────────────────────────────────────────────
   continuousMode: boolean;
@@ -156,6 +164,7 @@ interface Snapshot {
   voxelSubdivision: number;
   currentColor: string;
   currentTool: Tool;
+  targetMode: 'block' | 'face';
   continuousMode: boolean;
   symmetry: { x: boolean; y: boolean; z: boolean };
   symmetryOffset: { x: number; y: number; z: number };
@@ -163,8 +172,19 @@ interface Snapshot {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// Symmetry Helper
+// Helpers
 // ══════════════════════════════════════════════════════════════════════════════
+
+export function getFaceFromNormal(normal: [number, number, number]): 'top' | 'bottom' | 'right' | 'left' | 'front' | 'back' | null {
+  const [nx, ny, nz] = normal;
+  if (nx > 0.5) return 'right';
+  if (nx < -0.5) return 'left';
+  if (ny > 0.5) return 'top';
+  if (ny < -0.5) return 'bottom';
+  if (nz > 0.5) return 'front';
+  if (nz < -0.5) return 'back';
+  return null;
+}
 
 /**
  * Returns all mirrored coordinates for a given point based on the active symmetry axes.
@@ -223,6 +243,7 @@ export const useVoxelStore = create<VoxelEditorState>()((set, get) => {
       voxelSubdivision: s.voxelSubdivision,
       currentColor: s.currentColor,
       currentTool: s.currentTool,
+      targetMode: s.targetMode,
       continuousMode: s.continuousMode,
       symmetry: { ...s.symmetry },
       symmetryOffset: { ...s.symmetryOffset },
@@ -396,9 +417,13 @@ export const useVoxelStore = create<VoxelEditorState>()((set, get) => {
       }));
     },
 
-    fillVoxels: (startX, startY, startZ, targetColor, layerId?) => {
+    fillVoxels: (startX, startY, startZ, normal, targetColor, layerId?) => {
       const targetId = resolveLayer(layerId);
       if (!targetId) return;
+
+      const targetMode = get().targetMode;
+      const isFaceFill = targetMode === 'face' && normal;
+      const faceName = isFaceFill ? getFaceFromNormal(normal) : null;
 
       saveToHistory();
       set((s) => ({
@@ -408,7 +433,11 @@ export const useVoxelStore = create<VoxelEditorState>()((set, get) => {
           // Build a lookup map of positions → color (normalize to lowercase)
           const colorAt = new Map<string, string>();
           for (const v of l.voxels) {
-            colorAt.set(`${v.x},${v.y},${v.z}`, v.color.toLowerCase());
+            let col = v.color;
+            if (isFaceFill && faceName) {
+              col = v.faces?.[faceName] || v.color;
+            }
+            colorAt.set(`${v.x},${v.y},${v.z}`, col.toLowerCase());
           }
 
           const startKey = `${startX},${startY},${startZ}`;
@@ -447,11 +476,22 @@ export const useVoxelStore = create<VoxelEditorState>()((set, get) => {
           while (queue.length > 0 && toRecolor.size < MAX_FILL) {
             const [cx, cy, cz] = queue.shift()!;
 
-            const neighbors: [number, number, number][] = [
-              [cx+1, cy, cz], [cx-1, cy, cz],
-              [cx, cy+1, cz], [cx, cy-1, cz],
-              [cx, cy, cz+1], [cx, cy, cz-1],
-            ];
+            let neighbors: [number, number, number][] = [];
+            if (isFaceFill && faceName) {
+              if (faceName === 'top' || faceName === 'bottom') {
+                neighbors = [[cx+1, cy, cz], [cx-1, cy, cz], [cx, cy, cz+1], [cx, cy, cz-1]];
+              } else if (faceName === 'right' || faceName === 'left') {
+                neighbors = [[cx, cy+1, cz], [cx, cy-1, cz], [cx, cy, cz+1], [cx, cy, cz-1]];
+              } else if (faceName === 'front' || faceName === 'back') {
+                neighbors = [[cx+1, cy, cz], [cx-1, cy, cz], [cx, cy+1, cz], [cx, cy-1, cz]];
+              }
+            } else {
+              neighbors = [
+                [cx+1, cy, cz], [cx-1, cy, cz],
+                [cx, cy+1, cz], [cx, cy-1, cz],
+                [cx, cy, cz+1], [cx, cy, cz-1],
+              ];
+            }
 
             for (const [nx, ny, nz] of neighbors) {
               if (ny < 0) continue; // Only prevent underground filling
@@ -470,7 +510,10 @@ export const useVoxelStore = create<VoxelEditorState>()((set, get) => {
           const newVoxels = l.voxels.map((v) => {
             const key = `${v.x},${v.y},${v.z}`;
             if (toRecolor.has(key)) {
-              return { ...v, color: targetColor };
+              if (isFaceFill && faceName) {
+                return { ...v, faces: { ...(v.faces || {}), [faceName]: targetColor } };
+              }
+              return { ...v, color: targetColor, faces: undefined };
             }
             return v;
           });
@@ -499,13 +542,15 @@ export const useVoxelStore = create<VoxelEditorState>()((set, get) => {
       }));
     },
 
-    paintVoxel: (x, y, z, color, layerId?, skipHistory?) => {
+    paintVoxel: (x, y, z, normal, color, layerId?, skipHistory?) => {
       if (!isHexColor(color)) {
         warn('paintVoxel', `"${color}" is not a valid hex color.`);
         return;
       }
       const targetId = resolveLayer(layerId);
       if (!targetId) { warn('paintVoxel', 'No active layer.'); return; }
+
+      const targetMode = get().targetMode;
 
       if (!skipHistory) saveToHistory();
       set((s) => ({
@@ -518,7 +563,14 @@ export const useVoxelStore = create<VoxelEditorState>()((set, get) => {
           const newVoxels = l.voxels.map((v) => {
             if (points.some(([px, py, pz]) => px === v.x && py === v.y && pz === v.z)) {
               changed = true;
-              return { ...v, color };
+              if (targetMode === 'face' && normal) {
+                const faceName = getFaceFromNormal(normal);
+                if (faceName) {
+                  return { ...v, faces: { ...(v.faces || {}), [faceName]: color } };
+                }
+              }
+              // Clear faces if we are painting the entire block
+              return { ...v, color, faces: undefined };
             }
             return v;
           });
@@ -552,6 +604,9 @@ export const useVoxelStore = create<VoxelEditorState>()((set, get) => {
 
     currentTool: 'add',
     setCurrentTool: (tool) => set({ currentTool: tool }),
+
+    targetMode: 'block',
+    setTargetMode: (mode) => set({ targetMode: mode }),
 
     // ── Mass Placement & Symmetry ─────────────────────────────────────────────
     continuousMode: false,

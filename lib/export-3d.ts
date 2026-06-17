@@ -62,6 +62,8 @@ function buildTriangles(voxels: Voxel[]): Triangle[] {
     [0, 0, 1], [0, 0, -1], [0, 1, 0], [0, -1, 0], [1, 0, 0], [-1, 0, 0],
   ];
 
+  const FACE_NAMES = ['front', 'back', 'top', 'bottom', 'right', 'left'] as const;
+
   const triangles: Triangle[] = [];
 
   for (const voxel of voxels) {
@@ -72,6 +74,7 @@ function buildTriangles(voxels: Voxel[]): Triangle[] {
       const quad = FACE_QUADS[f];
       const normal = FACE_NORMALS[f];
       const ox = voxel.x, oy = voxel.y, oz = voxel.z;
+      const faceColor = voxel.faces?.[FACE_NAMES[f]] || voxel.color;
 
       const addTri = (
         a: [number, number, number],
@@ -83,7 +86,7 @@ function buildTriangles(voxels: Voxel[]): Triangle[] {
           v0: [ox + a[0], oy + a[1], oz + a[2]],
           v1: [ox + b[0], oy + b[1], oz + b[2]],
           v2: [ox + c[0], oy + c[1], oz + c[2]],
-          color: voxel.color,
+          color: faceColor,
         });
 
       addTri(quad[0], quad[1], quad[2]);

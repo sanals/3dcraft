@@ -7,6 +7,7 @@ import { Plus, Trash2, Paintbrush, Pointer, BoxSelect, PaintBucket, Route } from
 export function ToolPanel() {
   const {
     currentTool, setCurrentTool,
+    targetMode, setTargetMode,
     currentColor, setCurrentColor,
     continuousMode, setContinuousMode,
     symmetry, setSymmetry,
@@ -46,6 +47,30 @@ export function ToolPanel() {
           })}
         </div>
       </div>
+
+      {(currentTool === 'paint' || currentTool === 'fill') && (
+        <div className="mb-2">
+          <h3 className="text-sm font-semibold text-white mb-3">Target</h3>
+          <div className="flex gap-2">
+            <Button
+              variant={targetMode === 'block' ? 'default' : 'outline'}
+              size="sm"
+              onClick={() => setTargetMode('block')}
+              className="flex-1 text-xs"
+            >
+              Block
+            </Button>
+            <Button
+              variant={targetMode === 'face' ? 'default' : 'outline'}
+              size="sm"
+              onClick={() => setTargetMode('face')}
+              className="flex-1 text-xs"
+            >
+              Face
+            </Button>
+          </div>
+        </div>
+      )}
 
       <div>
         <h3 className="text-sm font-semibold text-white mb-3">Options</h3>
