@@ -392,9 +392,9 @@ function VoxelMesh({ orbitRef }: { orbitRef: React.MutableRefObject<any> }) {
             (Math.min(boxStartPos.current[2], hoveredPos[2]) + (Math.max(boxStartPos.current[2], hoveredPos[2]) - Math.min(boxStartPos.current[2], hoveredPos[2])) / 2 + 0.5) * voxelSize,
           ]}
           scale={[
-            (Math.max(boxStartPos.current[0], hoveredPos[0]) - Math.min(boxStartPos.current[0], hoveredPos[0]) + 1) * voxelSize * 1.05,
-            (Math.max(boxStartPos.current[1], hoveredPos[1]) - Math.min(boxStartPos.current[1], hoveredPos[1]) + 1) * voxelSize * 1.05,
-            (Math.max(boxStartPos.current[2], hoveredPos[2]) - Math.min(boxStartPos.current[2], hoveredPos[2]) + 1) * voxelSize * 1.05,
+            (Math.max(boxStartPos.current[0], hoveredPos[0]) - Math.min(boxStartPos.current[0], hoveredPos[0]) + 1) * voxelSize,
+            (Math.max(boxStartPos.current[1], hoveredPos[1]) - Math.min(boxStartPos.current[1], hoveredPos[1]) + 1) * voxelSize,
+            (Math.max(boxStartPos.current[2], hoveredPos[2]) - Math.min(boxStartPos.current[2], hoveredPos[2]) + 1) * voxelSize,
           ]}
         >
           <boxGeometry args={[1, 1, 1]} />
