@@ -1,4 +1,24 @@
+/**
+ * voxel-store.ts
+ *
+ * Single Zustand store for the voxel editor.
+ * Organized into clear sections:
+ *   Grid · Layers · Voxels · Tools · History · View · Reference Objects · File
+ *
+ * Design decisions:
+ *  • History snapshots are PLAIN DATA only — never functions or class instances.
+ *    This makes undo/redo trivially safe and keeps snapshots tiny.
+ *  • All mutation actions validate inputs and emit descriptive console.warn()
+ *    messages so bugs show up in the browser console during development.
+ *  • Reference objects are NOT part of undo/redo history — they are import
+ *    metadata, not creative work.
+ */
+
 import { create } from 'zustand';
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Public types
+// ══════════════════════════════════════════════════════════════════════════════
 
 export interface Voxel {
   x: number;
@@ -14,12 +34,42 @@ export interface Layer {
   voxels: Voxel[];
 }
 
-interface VoxelEditorStateBase {
-  // Grid state
+export type Tool = 'add' | 'remove' | 'paint' | 'select';
+
+/**
+ * An imported reference mesh (STL / OBJ / GLB).
+ * Three.js geometry is stored in refGeometryCache in reference-loader.ts;
+ * only serialisable metadata lives here.
+ */
+export interface ReferenceObject {
+  id: string;
+  name: string;
+  visible: boolean;
+  /** Locked = visual guide only; no voxel placement on its surface. */
+  locked: boolean;
+  /** 0.05 – 1.0. Applied to all child materials in the scene. */
+  opacity: number;
+  /** Include geometry when exporting OBJ / 3MF (opt-in per object). */
+  includeInExport: boolean;
+  position: [number, number, number];
+  /** Euler angles in degrees. */
+  rotation: [number, number, number];
+  scale: [number, number, number];
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Store interface
+// ══════════════════════════════════════════════════════════════════════════════
+
+export interface VoxelEditorState {
+  // ── Grid ──────────────────────────────────────────────────────────────────
   gridSize: number;
   setGridSize: (size: number) => void;
+  /** Number of voxels per edge of a single grid square. Default: 4 */
+  voxelSubdivision: number;
+  setVoxelSubdivision: (sub: number) => void;
 
-  // Layers
+  // ── Layers ────────────────────────────────────────────────────────────────
   layers: Layer[];
   activeLayerId: string | null;
   addLayer: (name: string) => void;
@@ -27,390 +77,365 @@ interface VoxelEditorStateBase {
   setActiveLayer: (id: string) => void;
   toggleLayerVisibility: (id: string) => void;
   renameLayer: (id: string, name: string) => void;
+  /** Return voxels for a specific layer (used for per-layer export). */
+  getLayerVoxels: (layerId: string) => Voxel[];
 
-  // Voxels
+  // ── Voxels ────────────────────────────────────────────────────────────────
   addVoxel: (voxel: Voxel, layerId?: string) => void;
   removeVoxel: (x: number, y: number, z: number, layerId?: string) => void;
   paintVoxel: (x: number, y: number, z: number, color: string, layerId?: string) => void;
   getVoxelAt: (x: number, y: number, z: number, layerId?: string) => Voxel | undefined;
+  /** Returns voxels from all *visible* layers combined. */
   getAllVoxels: () => Voxel[];
 
-  // Tools & colors
+  // ── Tools & Color ─────────────────────────────────────────────────────────
   currentColor: string;
   setCurrentColor: (color: string) => void;
-  currentTool: 'add' | 'remove' | 'paint' | 'select';
-  setCurrentTool: (tool: 'add' | 'remove' | 'paint' | 'select') => void;
+  currentTool: Tool;
+  setCurrentTool: (tool: Tool) => void;
 
-  // History
+  // ── History ───────────────────────────────────────────────────────────────
+  canUndo: boolean;
+  canRedo: boolean;
   undo: () => void;
   redo: () => void;
 
-  // View
+  // ── View ──────────────────────────────────────────────────────────────────
   showGrid: boolean;
   setShowGrid: (show: boolean) => void;
 
-  // File operations
+  // ── Reference Objects ─────────────────────────────────────────────────────
+  referenceObjects: ReferenceObject[];
+  addReferenceObject: (obj: ReferenceObject) => void;
+  removeReferenceObject: (id: string) => void;
+  updateReferenceObject: (id: string, patch: Partial<ReferenceObject>) => void;
+
+  // ── File Operations ───────────────────────────────────────────────────────
   clearAll: () => void;
   exportJSON: () => string;
   importJSON: (json: string) => void;
 }
 
-export type VoxelEditorState = VoxelEditorStateBase & {
-  canUndo: boolean;
-  canRedo: boolean;
-};
+// ══════════════════════════════════════════════════════════════════════════════
+// Validation helpers
+// ══════════════════════════════════════════════════════════════════════════════
 
-const createInitialState = (): Omit<VoxelEditorStateBase, 'undo' | 'redo'> => ({
-  gridSize: 16,
-  setGridSize: () => {},
-  layers: [
-    {
-      id: 'layer-0',
-      name: 'Layer 1',
-      visible: true,
-      voxels: [],
-    },
-  ],
-  activeLayerId: 'layer-0',
-  addLayer: () => {},
-  removeLayer: () => {},
-  setActiveLayer: () => {},
-  toggleLayerVisibility: () => {},
-  renameLayer: () => {},
-  addVoxel: () => {},
-  removeVoxel: () => {},
-  paintVoxel: () => {},
-  getVoxelAt: () => undefined,
-  getAllVoxels: () => [],
-  currentColor: '#FF0000',
-  setCurrentColor: () => {},
-  currentTool: 'add',
-  setCurrentTool: () => {},
-  showGrid: true,
-  setShowGrid: () => {},
-  clearAll: () => {},
-  exportJSON: () => '',
-  importJSON: () => {},
-});
+/** Accept only 6-digit hex colours like "#FF0000". */
+const isHexColor = (v: string): boolean => /^#[0-9A-Fa-f]{6}$/.test(v);
 
-export const useVoxelStore = create<VoxelEditorStateBase & { canUndo: boolean; canRedo: boolean }>((set, get) => {
-  let history: {
-    past: Array<Omit<VoxelEditorStateBase, 'undo' | 'redo'>>;
-    future: Array<Omit<VoxelEditorStateBase, 'undo' | 'redo'>>;
-  } = {
-    past: [],
-    future: [],
+const GRID_MIN = 4;
+const GRID_MAX = 64;
+const MAX_HISTORY_DEPTH = 50;
+
+function warn(action: string, message: string): void {
+  console.warn(`[VoxelStore / ${action}] ${message}`);
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// History snapshot type — PLAIN DATA only, never functions
+// ══════════════════════════════════════════════════════════════════════════════
+
+interface Snapshot {
+  layers: Layer[];
+  activeLayerId: string | null;
+  gridSize: number;
+  voxelSubdivision: number;
+  currentColor: string;
+  currentTool: Tool;
+  showGrid: boolean;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Store
+// ══════════════════════════════════════════════════════════════════════════════
+
+export const useVoxelStore = create<VoxelEditorState>()((set, get) => {
+  // ── History state ── private to this closure ────────────────────────────
+  const past: Snapshot[] = [];
+  const future: Snapshot[] = [];
+
+  /** Deep-copy the current plain-data fields into a snapshot. */
+  const takeSnapshot = (): Snapshot => {
+    const s = get();
+    return {
+      layers: JSON.parse(JSON.stringify(s.layers)),
+      activeLayerId: s.activeLayerId,
+      gridSize: s.gridSize,
+      voxelSubdivision: s.voxelSubdivision,
+      currentColor: s.currentColor,
+      currentTool: s.currentTool,
+      showGrid: s.showGrid,
+    };
   };
 
+  /**
+   * Call before any destructive mutation.
+   * Pushes the current state onto the past stack and clears the redo stack.
+   */
   const saveToHistory = () => {
-    const state = get();
-    history.past.push({
-      gridSize: state.gridSize,
-      layers: JSON.parse(JSON.stringify(state.layers)),
-      activeLayerId: state.activeLayerId,
-      currentColor: state.currentColor,
-      currentTool: state.currentTool,
-      showGrid: state.showGrid,
-      setGridSize: state.setGridSize,
-      setActiveLayer: state.setActiveLayer,
-      addLayer: state.addLayer,
-      removeLayer: state.removeLayer,
-      toggleLayerVisibility: state.toggleLayerVisibility,
-      renameLayer: state.renameLayer,
-      addVoxel: state.addVoxel,
-      removeVoxel: state.removeVoxel,
-      paintVoxel: state.paintVoxel,
-      getVoxelAt: state.getVoxelAt,
-      getAllVoxels: state.getAllVoxels,
-      setCurrentColor: state.setCurrentColor,
-      setCurrentTool: state.setCurrentTool,
-      setShowGrid: state.setShowGrid,
-      clearAll: state.clearAll,
-      exportJSON: state.exportJSON,
-      importJSON: state.importJSON,
-    });
-    history.future = [];
-    if (history.past.length > 50) {
-      history.past.shift();
-    }
+    past.push(takeSnapshot());
+    if (past.length > MAX_HISTORY_DEPTH) past.shift();
+    future.length = 0;
+    set({ canUndo: true, canRedo: false });
   };
 
-  const updateCanUndo = () => {
-    set({
-      canUndo: history.past.length > 0,
-      canRedo: history.future.length > 0,
-    });
-  };
+  /** Sync the canUndo / canRedo flags after a history operation. */
+  const syncFlags = () =>
+    set({ canUndo: past.length > 0, canRedo: future.length > 0 });
 
+  /** Resolve an optional layerId to the active layer id. */
+  const resolveLayer = (layerId?: string): string | null =>
+    layerId ?? get().activeLayerId;
+
+  // ════════════════════════════════════════════════════════════════════════════
   return {
-    ...createInitialState(),
-    canUndo: false,
-    canRedo: false,
+    // ── Grid ────────────────────────────────────────────────────────────────
+    gridSize: 16,
 
-    setGridSize: (size: number) => {
+    setGridSize: (size) => {
+      const clamped = Math.max(GRID_MIN, Math.min(GRID_MAX, Math.round(size)));
+      if (clamped !== Math.round(size)) {
+        warn('setGridSize', `${size} is outside [${GRID_MIN}–${GRID_MAX}], clamped to ${clamped}.`);
+      }
       saveToHistory();
-      set({ gridSize: size });
-      updateCanUndo();
+      set({ gridSize: clamped });
     },
 
-    addLayer: (name: string) => {
+    voxelSubdivision: 4,
+
+    setVoxelSubdivision: (sub) => {
+      const clamped = Math.max(1, Math.min(16, Math.round(sub)));
       saveToHistory();
-      set((state) => ({
-        layers: [
-          ...state.layers,
-          {
-            id: `layer-${Date.now()}`,
-            name,
-            visible: true,
-            voxels: [],
-          },
-        ],
+      set({ voxelSubdivision: clamped });
+    },
+
+    // ── Layers ──────────────────────────────────────────────────────────────
+    layers: [{ id: 'layer-0', name: 'Layer 1', visible: true, voxels: [] }],
+    activeLayerId: 'layer-0',
+
+    addLayer: (name) => {
+      const trimmed = name?.trim();
+      if (!trimmed) {
+        warn('addLayer', 'Layer name must not be empty.');
+        return;
+      }
+      saveToHistory();
+      const id = `layer-${Date.now()}`;
+      set((s) => ({
+        layers: [...s.layers, { id, name: trimmed, visible: true, voxels: [] }],
+        activeLayerId: id, // automatically switch to the new layer
       }));
-      updateCanUndo();
     },
 
-    removeLayer: (id: string) => {
+    removeLayer: (id) => {
+      const { layers } = get();
+      if (layers.length <= 1) {
+        warn('removeLayer', 'Cannot remove the last remaining layer.');
+        return;
+      }
+      if (!layers.some((l) => l.id === id)) {
+        warn('removeLayer', `Layer "${id}" does not exist.`);
+        return;
+      }
       saveToHistory();
-      set((state) => {
-        const filtered = state.layers.filter((l) => l.id !== id);
+      set((s) => {
+        const remaining = s.layers.filter((l) => l.id !== id);
         return {
-          layers: filtered,
+          layers: remaining,
           activeLayerId:
-            state.activeLayerId === id
-              ? filtered[0]?.id || null
-              : state.activeLayerId,
+            s.activeLayerId === id ? (remaining[0]?.id ?? null) : s.activeLayerId,
         };
       });
-      updateCanUndo();
     },
 
-    setActiveLayer: (id: string) => {
+    setActiveLayer: (id) => {
+      if (!get().layers.some((l) => l.id === id)) {
+        warn('setActiveLayer', `Layer "${id}" does not exist.`);
+        return;
+      }
       set({ activeLayerId: id });
     },
 
-    toggleLayerVisibility: (id: string) => {
-      set((state) => ({
-        layers: state.layers.map((l) =>
-          l.id === id ? { ...l, visible: !l.visible } : l
-        ),
+    toggleLayerVisibility: (id) => {
+      set((s) => ({
+        layers: s.layers.map((l) => (l.id === id ? { ...l, visible: !l.visible } : l)),
       }));
     },
 
-    renameLayer: (id: string, name: string) => {
-      set((state) => ({
-        layers: state.layers.map((l) =>
-          l.id === id ? { ...l, name } : l
-        ),
+    renameLayer: (id, name) => {
+      const trimmed = name?.trim();
+      if (!trimmed) {
+        warn('renameLayer', 'Layer name must not be empty.');
+        return;
+      }
+      set((s) => ({
+        layers: s.layers.map((l) => (l.id === id ? { ...l, name: trimmed } : l)),
       }));
     },
 
-    addVoxel: (voxel: Voxel, layerId?: string) => {
+    getLayerVoxels: (layerId) =>
+      get().layers.find((l) => l.id === layerId)?.voxels ?? [],
+
+    // ── Voxels ──────────────────────────────────────────────────────────────
+    addVoxel: (voxel, layerId?) => {
+      if (!isHexColor(voxel.color)) {
+        warn('addVoxel', `"${voxel.color}" is not a valid hex color (e.g. "#FF0000").`);
+        return;
+      }
+      const targetId = resolveLayer(layerId);
+      if (!targetId) { warn('addVoxel', 'No active layer to add to.'); return; }
+
       saveToHistory();
-      const targetLayerId = layerId || get().activeLayerId;
-      if (!targetLayerId) return;
-
-      set((state) => ({
-        layers: state.layers.map((layer) =>
-          layer.id === targetLayerId
-            ? {
-                ...layer,
-                voxels: layer.voxels.some(
-                  (v) => v.x === voxel.x && v.y === voxel.y && v.z === voxel.z
-                )
-                  ? layer.voxels
-                  : [...layer.voxels, voxel],
-              }
-            : layer
-        ),
+      set((s) => ({
+        layers: s.layers.map((l) => {
+          if (l.id !== targetId) return l;
+          // Skip if a voxel already exists at this position
+          const exists = l.voxels.some(
+            (v) => v.x === voxel.x && v.y === voxel.y && v.z === voxel.z
+          );
+          return exists ? l : { ...l, voxels: [...l.voxels, voxel] };
+        }),
       }));
-      updateCanUndo();
     },
 
-    removeVoxel: (x: number, y: number, z: number, layerId?: string) => {
-      saveToHistory();
-      const targetLayerId = layerId || get().activeLayerId;
-      if (!targetLayerId) return;
+    removeVoxel: (x, y, z, layerId?) => {
+      const targetId = resolveLayer(layerId);
+      if (!targetId) { warn('removeVoxel', 'No active layer.'); return; }
 
-      set((state) => ({
-        layers: state.layers.map((layer) =>
-          layer.id === targetLayerId
-            ? {
-                ...layer,
-                voxels: layer.voxels.filter(
-                  (v) => !(v.x === x && v.y === y && v.z === z)
-                ),
-              }
-            : layer
+      saveToHistory();
+      set((s) => ({
+        layers: s.layers.map((l) =>
+          l.id !== targetId
+            ? l
+            : { ...l, voxels: l.voxels.filter((v) => !(v.x === x && v.y === y && v.z === z)) }
         ),
       }));
-      updateCanUndo();
     },
 
-    paintVoxel: (x: number, y: number, z: number, color: string, layerId?: string) => {
-      saveToHistory();
-      const targetLayerId = layerId || get().activeLayerId;
-      if (!targetLayerId) return;
+    paintVoxel: (x, y, z, color, layerId?) => {
+      if (!isHexColor(color)) {
+        warn('paintVoxel', `"${color}" is not a valid hex color.`);
+        return;
+      }
+      const targetId = resolveLayer(layerId);
+      if (!targetId) { warn('paintVoxel', 'No active layer.'); return; }
 
-      set((state) => ({
-        layers: state.layers.map((layer) =>
-          layer.id === targetLayerId
-            ? {
-                ...layer,
-                voxels: layer.voxels.map((v) =>
+      saveToHistory();
+      set((s) => ({
+        layers: s.layers.map((l) =>
+          l.id !== targetId
+            ? l
+            : {
+                ...l,
+                voxels: l.voxels.map((v) =>
                   v.x === x && v.y === y && v.z === z ? { ...v, color } : v
                 ),
               }
-            : layer
         ),
       }));
-      updateCanUndo();
     },
 
-    getVoxelAt: (x: number, y: number, z: number, layerId?: string) => {
-      const targetLayerId = layerId || get().activeLayerId;
-      if (!targetLayerId) return undefined;
-
-      const layer = get().layers.find((l) => l.id === targetLayerId);
-      return layer?.voxels.find(
-        (v) => v.x === x && v.y === y && v.z === z
-      );
-    },
-
-    getAllVoxels: () => {
+    getVoxelAt: (x, y, z, layerId?) => {
+      const targetId = resolveLayer(layerId);
+      if (!targetId) return undefined;
       return get()
-        .layers.filter((l) => l.visible)
-        .flatMap((l) => l.voxels);
+        .layers.find((l) => l.id === targetId)
+        ?.voxels.find((v) => v.x === x && v.y === y && v.z === z);
     },
 
-    setCurrentColor: (color: string) => {
+    getAllVoxels: () =>
+      get().layers.filter((l) => l.visible).flatMap((l) => l.voxels),
+
+    // ── Tools & Color ────────────────────────────────────────────────────────
+    currentColor: '#FF0000',
+
+    setCurrentColor: (color) => {
+      if (!isHexColor(color)) {
+        warn('setCurrentColor', `"${color}" is not a valid hex color. Ignored.`);
+        return;
+      }
       set({ currentColor: color });
     },
 
-    setCurrentTool: (tool) => {
-      set({ currentTool: tool });
-    },
+    currentTool: 'add',
+    setCurrentTool: (tool) => set({ currentTool: tool }),
 
-    setShowGrid: (show: boolean) => {
-      set({ showGrid: show });
-    },
-
-    clearAll: () => {
-      saveToHistory();
-      set((state) => ({
-        layers: state.layers.map((l) => ({ ...l, voxels: [] })),
-      }));
-      updateCanUndo();
-    },
-
-    exportJSON: () => {
-      const state = get();
-      return JSON.stringify({
-        gridSize: state.gridSize,
-        layers: state.layers,
-      });
-    },
-
-    importJSON: (json: string) => {
-      try {
-        saveToHistory();
-        const data = JSON.parse(json);
-        set({
-          gridSize: data.gridSize || 16,
-          layers: data.layers || [],
-        });
-        updateCanUndo();
-      } catch (error) {
-        console.error('Failed to import JSON:', error);
-      }
-    },
+    // ── History ──────────────────────────────────────────────────────────────
+    canUndo: false,
+    canRedo: false,
 
     undo: () => {
-      if (history.past.length > 0) {
-        const currentState = {
-          gridSize: get().gridSize,
-          layers: JSON.parse(JSON.stringify(get().layers)),
-          activeLayerId: get().activeLayerId,
-          currentColor: get().currentColor,
-          currentTool: get().currentTool,
-          showGrid: get().showGrid,
-          setGridSize: get().setGridSize,
-          setActiveLayer: get().setActiveLayer,
-          addLayer: get().addLayer,
-          removeLayer: get().removeLayer,
-          toggleLayerVisibility: get().toggleLayerVisibility,
-          renameLayer: get().renameLayer,
-          addVoxel: get().addVoxel,
-          removeVoxel: get().removeVoxel,
-          paintVoxel: get().paintVoxel,
-          getVoxelAt: get().getVoxelAt,
-          getAllVoxels: get().getAllVoxels,
-          setCurrentColor: get().setCurrentColor,
-          setCurrentTool: get().setCurrentTool,
-          setShowGrid: get().setShowGrid,
-          clearAll: get().clearAll,
-          exportJSON: get().exportJSON,
-          importJSON: get().importJSON,
-        };
-        history.future.push(currentState);
-
-        const previousState = history.past.pop();
-        if (previousState) {
-          set({
-            gridSize: previousState.gridSize,
-            layers: previousState.layers,
-            activeLayerId: previousState.activeLayerId,
-            currentColor: previousState.currentColor,
-            currentTool: previousState.currentTool,
-            showGrid: previousState.showGrid,
-          });
-        }
-      }
-      updateCanUndo();
+      if (past.length === 0) return;
+      future.push(takeSnapshot());   // save current state so it can be redone
+      const prev = past.pop()!;
+      set(prev);
+      syncFlags();
     },
 
     redo: () => {
-      if (history.future.length > 0) {
-        const currentState = {
-          gridSize: get().gridSize,
-          layers: JSON.parse(JSON.stringify(get().layers)),
-          activeLayerId: get().activeLayerId,
-          currentColor: get().currentColor,
-          currentTool: get().currentTool,
-          showGrid: get().showGrid,
-          setGridSize: get().setGridSize,
-          setActiveLayer: get().setActiveLayer,
-          addLayer: get().addLayer,
-          removeLayer: get().removeLayer,
-          toggleLayerVisibility: get().toggleLayerVisibility,
-          renameLayer: get().renameLayer,
-          addVoxel: get().addVoxel,
-          removeVoxel: get().removeVoxel,
-          paintVoxel: get().paintVoxel,
-          getVoxelAt: get().getVoxelAt,
-          getAllVoxels: get().getAllVoxels,
-          setCurrentColor: get().setCurrentColor,
-          setCurrentTool: get().setCurrentTool,
-          setShowGrid: get().setShowGrid,
-          clearAll: get().clearAll,
-          exportJSON: get().exportJSON,
-          importJSON: get().importJSON,
-        };
-        history.past.push(currentState);
+      if (future.length === 0) return;
+      past.push(takeSnapshot());     // save current state so it can be undone
+      const next = future.pop()!;
+      set(next);
+      syncFlags();
+    },
 
-        const nextState = history.future.pop();
-        if (nextState) {
-          set({
-            gridSize: nextState.gridSize,
-            layers: nextState.layers,
-            activeLayerId: nextState.activeLayerId,
-            currentColor: nextState.currentColor,
-            currentTool: nextState.currentTool,
-            showGrid: nextState.showGrid,
-          });
-        }
+    // ── View ─────────────────────────────────────────────────────────────────
+    showGrid: true,
+    setShowGrid: (show) => set({ showGrid: show }),
+
+    // ── Reference Objects ─────────────────────────────────────────────────────
+    // Not part of undo/redo — importing a mesh is not "creative work".
+    referenceObjects: [],
+
+    addReferenceObject: (obj) => {
+      set((s) => ({ referenceObjects: [...s.referenceObjects, obj] }));
+    },
+
+    removeReferenceObject: (id) => {
+      set((s) => ({
+        referenceObjects: s.referenceObjects.filter((r) => r.id !== id),
+      }));
+    },
+
+    updateReferenceObject: (id, patch) => {
+      set((s) => ({
+        referenceObjects: s.referenceObjects.map((r) =>
+          r.id === id ? { ...r, ...patch } : r
+        ),
+      }));
+    },
+
+    // ── File Operations ───────────────────────────────────────────────────────
+    clearAll: () => {
+      saveToHistory();
+      set((s) => ({ layers: s.layers.map((l) => ({ ...l, voxels: [] })) }));
+    },
+
+    exportJSON: () => {
+      const { gridSize, voxelSubdivision, layers } = get();
+      return JSON.stringify({ version: 1, gridSize, voxelSubdivision, layers }, null, 2);
+    },
+
+    importJSON: (json) => {
+      let data: Record<string, unknown>;
+      try {
+        data = JSON.parse(json);
+      } catch (e) {
+        warn('importJSON', `JSON parse error: ${(e as Error).message}`);
+        return;
       }
-      updateCanUndo();
+      if (!Array.isArray(data.layers)) {
+        warn('importJSON', 'Invalid file — "layers" array is missing.');
+        return;
+      }
+      saveToHistory();
+      set({
+        gridSize: typeof data.gridSize === 'number' ? data.gridSize : 16,
+        voxelSubdivision: typeof data.voxelSubdivision === 'number' ? data.voxelSubdivision : 4,
+        layers: data.layers as Layer[],
+        activeLayerId: ((data.layers as Layer[])[0]?.id) ?? null,
+      });
     },
   };
 });
-

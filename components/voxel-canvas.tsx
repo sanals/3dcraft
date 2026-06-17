@@ -5,6 +5,7 @@ import { Canvas, useThree } from '@react-three/fiber';
 import { OrbitControls, Grid } from '@react-three/drei';
 import * as THREE from 'three';
 import { useVoxelStore } from '@/lib/voxel-store';
+import { refGeometryCache, setRefOpacity } from '@/lib/reference-loader';
 
 // Shared geometry/material created once, outside component to avoid recreation
 const BOX_GEO = new THREE.BoxGeometry(1, 1, 1);
@@ -15,9 +16,11 @@ function VoxelMesh() {
   const groundPlaneRef = useRef<THREE.Mesh>(null);
   const orbitRef = useRef<any>(null);
 
-  const { getAllVoxels, currentTool, addVoxel, removeVoxel, paintVoxel, currentColor, gridSize } =
+  const { getAllVoxels, currentTool, addVoxel, removeVoxel, paintVoxel, currentColor, gridSize, voxelSubdivision } =
     useVoxelStore();
   const { camera, raycaster, gl } = useThree();
+
+  const voxelSize = 1 / voxelSubdivision;
 
   const [hoveredPos, setHoveredPos] = useState<[number, number, number] | null>(null);
 
@@ -58,38 +61,30 @@ function VoxelMesh() {
     if (!meshRef.current) return;
 
     const dummy = new THREE.Object3D();
+    const tempColor = new THREE.Color();
     meshRef.current.count = voxels.length;
-
-    const colors = new Float32Array(voxels.length * 3);
 
     voxels.forEach((voxel, index) => {
       // +0.5 on all axes so each voxel sits INSIDE its grid cell,
-      // not on the intersection of grid lines.
-      dummy.position.set(voxel.x + 0.5, voxel.y + 0.5, voxel.z + 0.5);
-      dummy.scale.set(0.95, 0.95, 0.95);
+      // then scale down by voxelSize so e.g. 4×4 = 16 voxels fit per grid square.
+      dummy.position.set(
+        (voxel.x + 0.5) * voxelSize,
+        (voxel.y + 0.5) * voxelSize,
+        (voxel.z + 0.5) * voxelSize
+      );
+      dummy.scale.set(0.95 * voxelSize, 0.95 * voxelSize, 0.95 * voxelSize);
       dummy.updateMatrix();
       meshRef.current!.setMatrixAt(index, dummy.matrix);
 
-      const hex = voxel.color.replace('#', '');
-      const r = parseInt(hex.substring(0, 2), 16) / 255;
-      const g = parseInt(hex.substring(2, 4), 16) / 255;
-      const b = parseInt(hex.substring(4, 6), 16) / 255;
-      colors[index * 3] = r;
-      colors[index * 3 + 1] = g;
-      colors[index * 3 + 2] = b;
+      tempColor.set(voxel.color);
+      meshRef.current!.setColorAt(index, tempColor);
     });
 
     meshRef.current.instanceMatrix.needsUpdate = true;
-
-    // Always delete and recreate the color attribute — Three.js does not support
-    // resizing an existing buffer attribute, so we can never patch the old array
-    // when the voxel count changes.
-    meshRef.current.geometry.deleteAttribute('color');
-    meshRef.current.geometry.setAttribute(
-      'color',
-      new THREE.InstancedBufferAttribute(colors, 3)
-    );
-  }, [voxels]);
+    if (meshRef.current.instanceColor) {
+      meshRef.current.instanceColor.needsUpdate = true;
+    }
+  }, [voxels, voxelSize]);
 
   // Update hover-ghost material color when tool or currentColor changes
   useEffect(() => {
@@ -121,31 +116,47 @@ function VoxelMesh() {
           const matrix = new THREE.Matrix4();
           meshRef.current.getMatrixAt(idx, matrix);
           const renderPos = new THREE.Vector3().setFromMatrixPosition(matrix);
-          // renderPos = storePos + 0.5 on all axes  →  storePos = renderPos - 0.5
-          const storeX = Math.round(renderPos.x - 0.5);
-          const storeY = Math.round(renderPos.y - 0.5);
-          const storeZ = Math.round(renderPos.z - 0.5);
-          // New voxel is one step along the face normal from the store position
-          const nx = storeX + Math.round(normal.x);
-          const ny = storeY + Math.round(normal.y);
-          const nz = storeZ + Math.round(normal.z);
-          if (ny >= 0) return [nx, ny, nz];
+          // renderPos = (storePos + 0.5) * voxelSize
+          // → storePos = renderPos / voxelSize - 0.5
+          const storeX = Math.round(renderPos.x / voxelSize - 0.5);
+          const storeY = Math.round(renderPos.y / voxelSize - 0.5);
+          const storeZ = Math.round(renderPos.z / voxelSize - 0.5);
+
+          if (currentTool === 'add') {
+            // New voxel is one step along the face normal from the store position
+            const nx = storeX + Math.round(normal.x);
+            const ny = storeY + Math.round(normal.y);
+            const nz = storeZ + Math.round(normal.z);
+            if (ny >= 0) return [nx, ny, nz];
+            return null;
+          } else {
+            // Remove, Paint, or Select tools target the exact voxel intersected
+            return [storeX, storeY, storeZ];
+          }
         }
       }
 
       // 2. Fall back: hit the ground plane
       if (groundPlaneRef.current) {
+        // If we are removing or painting, we shouldn't target the ground plane.
+        // We only want to interact with empty ground space when adding.
+        if (currentTool !== 'add') return null;
+
         const hits = raycaster.intersectObject(groundPlaneRef.current);
         if (hits.length > 0) {
           const p = hits[0].point;
-          // Math.floor maps world position to cell index:
-          // cell 0 spans world 0–1, cell 1 spans 1–2, etc.
-          return [Math.floor(p.x), 0, Math.floor(p.z)];
+          // Divide by voxelSize then floor to snap to the correct voxel cell.
+          // With voxelSize=0.25: clicking at world x=0.6 → store x = floor(0.6/0.25) = floor(2.4) = 2
+          return [
+            Math.floor(p.x / voxelSize),
+            0,
+            Math.floor(p.z / voxelSize),
+          ];
         }
       }
       return null;
     },
-    [camera, raycaster, voxels]
+    [camera, raycaster, voxels, voxelSize, currentTool]
   );
 
   // Convert native DOM event to NDC for raycasting
@@ -254,19 +265,59 @@ function VoxelMesh() {
       {/* Hover ghost */}
       {hoveredPos && (
         <mesh
-          // +0.5 on all axes matches the render offset applied to real voxels
-          position={[hoveredPos[0] + 0.5, hoveredPos[1] + 0.5, hoveredPos[2] + 0.5]}
+          // Scale and position consistent with real voxel rendering
+          position={[
+            (hoveredPos[0] + 0.5) * voxelSize,
+            (hoveredPos[1] + 0.5) * voxelSize,
+            (hoveredPos[2] + 0.5) * voxelSize,
+          ]}
           geometry={HOVER_GEO}
           material={hoverMaterial}
-          scale={[1.05, 1.05, 1.05]}
+          scale={[1.05 * voxelSize, 1.05 * voxelSize, 1.05 * voxelSize]}
         />
       )}
     </>
   );
 }
 
+// ── Reference Objects renderer ────────────────────────────────────────────────
+
+/**
+ * Renders every imported reference mesh from the Zustand store.
+ * The actual Three.js Groups live in refGeometryCache (see reference-loader.ts);
+ * we read metadata (position, rotation, scale, visible) from the store and
+ * apply them as props on a <primitive> element.
+ */
+function ReferenceObjects() {
+  const referenceObjects = useVoxelStore((s) => s.referenceObjects);
+
+  return (
+    <>
+      {referenceObjects.map((obj) => {
+        const group = refGeometryCache.get(obj.id);
+        if (!group || !obj.visible) return null;
+
+        const rotRad = obj.rotation.map((deg) =>
+          THREE.MathUtils.degToRad(deg)
+        ) as [number, number, number];
+
+        return (
+          <primitive
+            key={obj.id}
+            object={group}
+            position={obj.position}
+            rotation={rotRad}
+            scale={obj.scale}
+          />
+        );
+      })}
+    </>
+  );
+}
+
 function Scene() {
-  const { showGrid, gridSize } = useVoxelStore();
+  const { showGrid, gridSize, voxelSubdivision } = useVoxelStore();
+  const voxelSize = 1 / voxelSubdivision;
 
   return (
     <>
@@ -276,21 +327,36 @@ function Scene() {
       <pointLight position={[-10, -10, -10]} intensity={0.4} />
 
       <VoxelMesh />
+      <ReferenceObjects />
 
-      {showGrid && <Grid args={[gridSize * 2, gridSize * 2]} cellSize={1} />}
+      {showGrid && (
+        <Grid
+          args={[gridSize * 2, gridSize * 2]}
+          // Fine sub-grid: one cell per voxel slot
+          cellSize={voxelSize}
+          cellColor="#1e3a4a"
+          cellThickness={0.4}
+          // Coarse grid: one section per original grid square (1.0 world units)
+          sectionSize={1}
+          sectionColor="#2255aa"
+          sectionThickness={1.2}
+          fadeDistance={30}
+          fadeStrength={1.5}
+        />
+      )}
 
-      <OrbitControls
-        makeDefault
-        mouseButtons={{
-          LEFT: THREE.MOUSE.ROTATE,
-          MIDDLE: THREE.MOUSE.DOLLY,
-          RIGHT: THREE.MOUSE.PAN,
-        }}
-        autoRotate={false}
-        minDistance={5}
-        maxDistance={100}
-        enablePan={true}
-      />
+        <OrbitControls
+          makeDefault
+          mouseButtons={{
+            LEFT: THREE.MOUSE.ROTATE,
+            MIDDLE: THREE.MOUSE.DOLLY,
+            RIGHT: THREE.MOUSE.PAN,
+          }}
+          autoRotate={false}
+          minDistance={0.5}
+          maxDistance={100}
+          enablePan={true}
+        />
     </>
   );
 }
@@ -300,7 +366,8 @@ export function VoxelCanvas() {
     <div className="flex-1 w-full overflow-hidden">
       <Canvas
         camera={{
-          position: [20, 20, 20],
+          // Start closer so individual 0.25-unit voxels are visible
+          position: [8, 8, 8],
           fov: 50,
           far: 10000,
         }}

@@ -5,6 +5,7 @@ import { ToolPanel } from './tool-panel';
 import { LayerPanel } from './layer-panel';
 import { ViewPanel } from './view-panel';
 import { FilePanel } from './file-panel';
+import { ReferencePanel } from './reference-panel';
 import { StatusBar } from './status-bar';
 import { useKeyboardShortcuts } from '@/hooks/use-keyboard-shortcuts';
 
@@ -25,6 +26,7 @@ export function VoxelEditor() {
           <LayerPanel />
           <ViewPanel />
           <FilePanel />
+          <ReferencePanel />
         </div>
       </div>
 
