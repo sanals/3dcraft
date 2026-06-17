@@ -74,7 +74,7 @@ function VoxelMesh({ orbitRef }: { orbitRef: React.MutableRefObject<any> }) {
   // Track how far the mouse has moved since pointerdown to distinguish click vs drag
   const pointerDownPos = useRef<{ x: number; y: number } | null>(null);
   const isDragging = useRef(false);
-  const DRAG_THRESHOLD = 4; // pixels
+  const DRAG_THRESHOLD = 10; // pixels
 
   const voxels = getAllVoxels();
 
@@ -106,6 +106,7 @@ function VoxelMesh({ orbitRef }: { orbitRef: React.MutableRefObject<any> }) {
     if (meshRef.current.instanceColor) {
       meshRef.current.instanceColor.needsUpdate = true;
     }
+    meshRef.current.computeBoundingSphere();
   }, [voxels, voxelSize]);
 
   // Update hover-ghost material color when tool or currentColor changes
@@ -122,6 +123,7 @@ function VoxelMesh({ orbitRef }: { orbitRef: React.MutableRefObject<any> }) {
    * Compute the hovered grid position by raycasting against:
    *   1. Existing voxels (instanced mesh) → place on top face
    *   2. The invisible ground plane          → place at y=0
+   * Used for hover visual feedback (always shows cursor).
    */
   const computeHoverPos = useCallback(
     (ndc: THREE.Vector2): [number, number, number] | null => {
@@ -130,31 +132,22 @@ function VoxelMesh({ orbitRef }: { orbitRef: React.MutableRefObject<any> }) {
       // 1. Try hitting existing voxels first
       if (meshRef.current && voxels.length > 0) {
         const hits = raycaster.intersectObject(meshRef.current);
-        // Filter to only hits on REAL instances (not phantom pre-allocated slots)
         const validHit = hits.find((h) => h.instanceId !== undefined && h.instanceId < voxels.length);
         if (validHit) {
-          // The face normal tells us which face was hit
           const normal = validHit.face?.normal ?? new THREE.Vector3(0, 1, 0);
-          // instanceId gives us the voxel
           const idx = validHit.instanceId!;
-          const matrix = new THREE.Matrix4();
-          meshRef.current.getMatrixAt(idx, matrix);
-          const renderPos = new THREE.Vector3().setFromMatrixPosition(matrix);
-          // renderPos = (storePos + 0.5) * voxelSize
-          // → storePos = renderPos / voxelSize - 0.5
-          const storeX = Math.round(renderPos.x / voxelSize - 0.5);
-          const storeY = Math.round(renderPos.y / voxelSize - 0.5);
-          const storeZ = Math.round(renderPos.z / voxelSize - 0.5);
+          const voxel = voxels[idx];
+          const storeX = voxel.x;
+          const storeY = voxel.y;
+          const storeZ = voxel.z;
 
           if (currentTool === 'add' || currentTool === 'box') {
-            // New voxel is one step along the face normal from the store position
             const nx = storeX + Math.round(normal.x);
             const ny = storeY + Math.round(normal.y);
             const nz = storeZ + Math.round(normal.z);
             if (ny >= 0) return [nx, ny, nz];
             return null;
           } else {
-            // Remove, Paint, Fill, or Select tools target the exact voxel intersected
             return [storeX, storeY, storeZ];
           }
         }
@@ -177,6 +170,25 @@ function VoxelMesh({ orbitRef }: { orbitRef: React.MutableRefObject<any> }) {
     [camera, raycaster, voxels, voxelSize, currentTool]
   );
 
+  /**
+   * Raycast ONLY against existing voxels — returns the exact voxel position hit.
+   * Used by paint/fill/remove tools that need to target a real block.
+   */
+  const computeVoxelHitPos = useCallback(
+    (ndc: THREE.Vector2): [number, number, number] | null => {
+      raycaster.setFromCamera(ndc, camera);
+      if (!meshRef.current || voxels.length === 0) return null;
+
+      const hits = raycaster.intersectObject(meshRef.current);
+      const validHit = hits.find((h) => h.instanceId !== undefined && h.instanceId < voxels.length);
+      if (!validHit) return null;
+
+      const voxel = voxels[validHit.instanceId!];
+      return [voxel.x, voxel.y, voxel.z];
+    },
+    [camera, raycaster, voxels]
+  );
+
   // Convert native DOM event to NDC for raycasting
   const domToNDC = useCallback(
     (e: MouseEvent | PointerEvent): THREE.Vector2 => {
@@ -193,29 +205,40 @@ function VoxelMesh({ orbitRef }: { orbitRef: React.MutableRefObject<any> }) {
 
   const executeTool = useCallback(
     (ndc: THREE.Vector2, skipHistory: boolean = false) => {
-      const pos = computeHoverPos(ndc);
-      if (!pos) return;
-      const [x, y, z] = pos;
-      const posKey = `${x},${y},${z}`;
-
-      // Prevent triggering the tool on the exact same block multiple times during a single drag
-      if (skipHistory && lastDrawnPos.current === posKey) return;
-      lastDrawnPos.current = posKey;
-
       if (currentTool === 'add') {
+        const pos = computeHoverPos(ndc);
+        if (!pos) return;
+        const [x, y, z] = pos;
+        const posKey = `${x},${y},${z}`;
+        if (skipHistory && lastDrawnPos.current === posKey) return;
+        lastDrawnPos.current = posKey;
         addVoxel({ x, y, z, color: currentColor }, undefined, skipHistory);
       } else if (currentTool === 'remove') {
+        const pos = computeVoxelHitPos(ndc);
+        if (!pos) return;
+        const [x, y, z] = pos;
+        const posKey = `${x},${y},${z}`;
+        if (skipHistory && lastDrawnPos.current === posKey) return;
+        lastDrawnPos.current = posKey;
         removeVoxel(x, y, z, undefined, skipHistory);
       } else if (currentTool === 'paint') {
+        const pos = computeVoxelHitPos(ndc);
+        if (!pos) return;
+        const [x, y, z] = pos;
+        const posKey = `${x},${y},${z}`;
+        if (skipHistory && lastDrawnPos.current === posKey) return;
+        lastDrawnPos.current = posKey;
         paintVoxel(x, y, z, currentColor, undefined, skipHistory);
       } else if (currentTool === 'fill') {
-        // Only run fill on single clicks, drag-to-fill is too expensive
         if (!skipHistory) {
+          const pos = computeVoxelHitPos(ndc);
+          if (!pos) return;
+          const [x, y, z] = pos;
           fillVoxels(x, y, z, currentColor, undefined);
         }
       }
     },
-    [computeHoverPos, currentTool, currentColor, addVoxel, removeVoxel, paintVoxel, fillVoxels]
+    [computeHoverPos, computeVoxelHitPos, currentTool, currentColor, addVoxel, removeVoxel, paintVoxel, fillVoxels]
   );
 
   // ── Pointer event handlers (attached to canvas DOM element) ────────────────
@@ -244,7 +267,7 @@ function VoxelMesh({ orbitRef }: { orbitRef: React.MutableRefObject<any> }) {
     pointerDownPos.current = { x: e.clientX, y: e.clientY };
     isDragging.current = false;
 
-    if (continuousMode) {
+    if (continuousMode && (currentTool === 'add' || currentTool === 'paint' || currentTool === 'remove')) {
       if (orbitRef.current) orbitRef.current.enabled = false;
       isDrawing.current = true;
       lastDrawnPos.current = null;

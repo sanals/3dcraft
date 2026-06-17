@@ -405,18 +405,27 @@ export const useVoxelStore = create<VoxelEditorState>()((set, get) => {
         layers: s.layers.map((l) => {
           if (l.id !== targetId) return l;
 
-          // Build a lookup map of positions → color
+          // Build a lookup map of positions → color (normalize to lowercase)
           const colorAt = new Map<string, string>();
           for (const v of l.voxels) {
-            colorAt.set(`${v.x},${v.y},${v.z}`, v.color);
+            colorAt.set(`${v.x},${v.y},${v.z}`, v.color.toLowerCase());
           }
 
           const startKey = `${startX},${startY},${startZ}`;
           const matchColor = colorAt.get(startKey);
+          const normalTarget = targetColor.toLowerCase();
           // Only work on existing voxels — don't fill empty space
-          if (!matchColor) return l;
+          if (!matchColor) {
+            console.log('[Fill] No voxel at clicked position:', startKey);
+            return l;
+          }
           // Already the target color — nothing to do
-          if (matchColor === targetColor) return l;
+          if (matchColor === normalTarget) {
+            console.log('[Fill] Already target color, nothing to do');
+            return l;
+          }
+
+          console.log(`[Fill] matchColor="${matchColor}" → targetColor="${normalTarget}", total voxels=${l.voxels.length}`);
 
           // BFS to find all connected voxels with matchColor
           const toRecolor = new Set<string>();
@@ -445,7 +454,7 @@ export const useVoxelStore = create<VoxelEditorState>()((set, get) => {
             ];
 
             for (const [nx, ny, nz] of neighbors) {
-              if (nx < -gs*2 || nx > gs*2 || ny < 0 || ny > gs*2 || nz < -gs*2 || nz > gs*2) continue;
+              if (ny < 0) continue; // Only prevent underground filling
               const key = `${nx},${ny},${nz}`;
               if (toRecolor.has(key)) continue;
               if (colorAt.get(key) === matchColor) {
@@ -454,6 +463,8 @@ export const useVoxelStore = create<VoxelEditorState>()((set, get) => {
               }
             }
           }
+
+          console.log(`[Fill] BFS found ${toRecolor.size} voxels to recolor`);
 
           // Produce new immutable voxel array
           const newVoxels = l.voxels.map((v) => {
