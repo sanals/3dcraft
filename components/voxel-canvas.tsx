@@ -11,13 +11,17 @@ import { refGeometryCache, setRefOpacity } from '@/lib/reference-loader';
 const BOX_GEO = new THREE.BoxGeometry(1, 1, 1);
 const HOVER_GEO = new THREE.BoxGeometry(1, 1, 1);
 
-function VoxelMesh() {
+function VoxelMesh({ orbitRef }: { orbitRef: React.MutableRefObject<any> }) {
   const meshRef = useRef<THREE.InstancedMesh>(null);
   const groundPlaneRef = useRef<THREE.Mesh>(null);
-  const orbitRef = useRef<any>(null);
 
-  const { getAllVoxels, currentTool, addVoxel, removeVoxel, paintVoxel, currentColor, gridSize, voxelSubdivision } =
-    useVoxelStore();
+  const {
+    getAllVoxels, currentTool,
+    addVoxel, removeVoxel, paintVoxel, batchAddVoxels,
+    currentColor, gridSize, voxelSubdivision,
+    symmetry, symmetryOffset,
+    beginInteraction
+  } = useVoxelStore();
   const { camera, raycaster, gl } = useThree();
 
   const voxelSize = 1 / voxelSubdivision;
@@ -48,6 +52,13 @@ function VoxelMesh() {
       }),
     []
   );
+
+  // Track drag-to-draw state
+  const isDrawing = useRef(false);
+  const lastDrawnPos = useRef<string | null>(null);
+
+  // Track Box tool state
+  const boxStartPos = useRef<[number, number, number] | null>(null);
 
   // Track how far the mouse has moved since pointerdown to distinguish click vs drag
   const pointerDownPos = useRef<{ x: number; y: number } | null>(null);
@@ -122,7 +133,7 @@ function VoxelMesh() {
           const storeY = Math.round(renderPos.y / voxelSize - 0.5);
           const storeZ = Math.round(renderPos.z / voxelSize - 0.5);
 
-          if (currentTool === 'add') {
+          if (currentTool === 'add' || currentTool === 'box') {
             // New voxel is one step along the face normal from the store position
             const nx = storeX + Math.round(normal.x);
             const ny = storeY + Math.round(normal.y);
@@ -140,7 +151,7 @@ function VoxelMesh() {
       if (groundPlaneRef.current) {
         // If we are removing or painting, we shouldn't target the ground plane.
         // We only want to interact with empty ground space when adding.
-        if (currentTool !== 'add') return null;
+        if (currentTool !== 'add' && currentTool !== 'box') return null;
 
         const hits = raycaster.intersectObject(groundPlaneRef.current);
         if (hits.length > 0) {
@@ -171,17 +182,75 @@ function VoxelMesh() {
     [gl]
   );
 
+  // ── Tool Execution ─────────────────────────────────────────────────────────
+
+  const executeTool = useCallback(
+    (ndc: THREE.Vector2, skipHistory: boolean = false) => {
+      const pos = computeHoverPos(ndc);
+      if (!pos) return;
+      const [x, y, z] = pos;
+      const posKey = `${x},${y},${z}`;
+
+      // Prevent triggering the tool on the exact same block multiple times during a single drag
+      if (skipHistory && lastDrawnPos.current === posKey) return;
+      lastDrawnPos.current = posKey;
+
+      if (currentTool === 'add') {
+        addVoxel({ x, y, z, color: currentColor }, undefined, skipHistory);
+      } else if (currentTool === 'remove') {
+        removeVoxel(x, y, z, undefined, skipHistory);
+      } else if (currentTool === 'paint') {
+        paintVoxel(x, y, z, currentColor, undefined, skipHistory);
+      }
+    },
+    [computeHoverPos, currentTool, currentColor, addVoxel, removeVoxel, paintVoxel]
+  );
+
   // ── Pointer event handlers (attached to canvas DOM element) ────────────────
 
   const handlePointerDown = useCallback((e: PointerEvent) => {
+    if (e.button !== 0) return; // Only trigger tools on left click
+    
+    const ndc = domToNDC(e);
+    const pos = computeHoverPos(ndc);
+    
+    // Handle Box tool
+    if (currentTool === 'box') {
+      if (pos) {
+        boxStartPos.current = pos;
+        if (orbitRef.current) orbitRef.current.enabled = false;
+        if (gl.domElement.setPointerCapture) {
+          gl.domElement.setPointerCapture(e.pointerId);
+        }
+      }
+      return;
+    }
+
     pointerDownPos.current = { x: e.clientX, y: e.clientY };
     isDragging.current = false;
-  }, []);
+
+    if (e.ctrlKey || e.metaKey) {
+      if (orbitRef.current) orbitRef.current.enabled = false;
+      isDrawing.current = true;
+      lastDrawnPos.current = null;
+      beginInteraction(); // Start history batch
+
+      executeTool(ndc, true); // true = skip individual history save since beginInteraction handled it
+      
+      // Capture pointer so dragging outside the canvas still works
+      if (gl.domElement.setPointerCapture) {
+        gl.domElement.setPointerCapture(e.pointerId);
+      }
+    }
+  }, [beginInteraction, domToNDC, executeTool, gl.domElement, computeHoverPos, currentTool, orbitRef]);
 
   const handlePointerMove = useCallback(
     (e: PointerEvent) => {
-      // Detect drag
-      if (pointerDownPos.current) {
+      const ndc = domToNDC(e);
+      setHoveredPos(computeHoverPos(ndc));
+
+      // Detect drag for non-ctrl clicks
+      if (pointerDownPos.current && !isDrawing.current) {
         const dx = e.clientX - pointerDownPos.current.x;
         const dy = e.clientY - pointerDownPos.current.y;
         if (Math.sqrt(dx * dx + dy * dy) > DRAG_THRESHOLD) {
@@ -189,33 +258,76 @@ function VoxelMesh() {
         }
       }
 
-      const ndc = domToNDC(e);
-      setHoveredPos(computeHoverPos(ndc));
+      if (isDrawing.current) {
+        executeTool(ndc, true);
+      }
     },
-    [domToNDC, computeHoverPos]
+    [domToNDC, computeHoverPos, executeTool]
   );
 
   const handlePointerUp = useCallback(
     (e: PointerEvent) => {
-      // Only fire if this was a clean click (not a drag)
-      if (!isDragging.current && e.button === 0) {
-        const ndc = domToNDC(e);
-        const pos = computeHoverPos(ndc);
-        if (!pos) return;
-        const [x, y, z] = pos;
+      if (e.button !== 0) return;
+      
+      // Handle Box tool completion
+      if (currentTool === 'box' && boxStartPos.current) {
+        const endPos = computeHoverPos(domToNDC(e)) || hoveredPos;
+        if (endPos) {
+          const [x1, y1, z1] = boxStartPos.current;
+          const [x2, y2, z2] = endPos;
+          
+          const minX = Math.min(x1, x2);
+          const maxX = Math.max(x1, x2);
+          const minY = Math.min(y1, y2);
+          const maxY = Math.max(y1, y2);
+          const minZ = Math.min(z1, z2);
+          const maxZ = Math.max(z1, z2);
+          
+          const vol = (maxX - minX + 1) * (maxY - minY + 1) * (maxZ - minZ + 1);
+          if (vol < 100000) {
+            const voxelsToApply: {x: number, y: number, z: number, color: string}[] = [];
+            for (let x = minX; x <= maxX; x++) {
+              for (let y = minY; y <= maxY; y++) {
+                for (let z = minZ; z <= maxZ; z++) {
+                  voxelsToApply.push({ x, y, z, color: currentColor });
+                }
+              }
+            }
+            batchAddVoxels(voxelsToApply);
+          } else {
+            console.warn(`Box too large to generate! Vol: ${vol}`);
+          }
+        }
+        boxStartPos.current = null;
+        if (orbitRef.current) orbitRef.current.enabled = true;
+        if (gl.domElement.releasePointerCapture) {
+          gl.domElement.releasePointerCapture(e.pointerId);
+        }
+        return;
+      }
 
-        if (currentTool === 'add') {
-          addVoxel({ x, y, z, color: currentColor });
-        } else if (currentTool === 'remove') {
-          removeVoxel(x, y, z);
-        } else if (currentTool === 'paint') {
-          paintVoxel(x, y, z, currentColor);
+      if (isDrawing.current) {
+        // Finishing a continuous paint
+        isDrawing.current = false;
+        lastDrawnPos.current = null;
+        if (orbitRef.current) orbitRef.current.enabled = true;
+        
+        if (gl.domElement.releasePointerCapture) {
+          gl.domElement.releasePointerCapture(e.pointerId);
+        }
+      } else {
+        // Finishing a normal click (no ctrl)
+        if (!isDragging.current) {
+          // It was a single click without dragging, so execute tool once
+          const ndc = domToNDC(e);
+          executeTool(ndc, false); // don't skip history
         }
       }
+
       pointerDownPos.current = null;
       isDragging.current = false;
     },
-    [currentTool, currentColor, addVoxel, removeVoxel, paintVoxel, domToNDC, computeHoverPos]
+    [domToNDC, executeTool, gl.domElement, computeHoverPos, hoveredPos, currentTool, batchAddVoxels, currentColor, orbitRef]
   );
 
   const handlePointerLeave = useCallback(() => {
@@ -262,8 +374,27 @@ function VoxelMesh() {
         />
       )}
 
-      {/* Hover ghost */}
-      {hoveredPos && (
+      {/* Box Tool Ghost Preview */}
+      {currentTool === 'box' && boxStartPos.current && hoveredPos && (
+        <mesh
+          position={[
+            (Math.min(boxStartPos.current[0], hoveredPos[0]) + (Math.max(boxStartPos.current[0], hoveredPos[0]) - Math.min(boxStartPos.current[0], hoveredPos[0])) / 2 + 0.5) * voxelSize,
+            (Math.min(boxStartPos.current[1], hoveredPos[1]) + (Math.max(boxStartPos.current[1], hoveredPos[1]) - Math.min(boxStartPos.current[1], hoveredPos[1])) / 2 + 0.5) * voxelSize,
+            (Math.min(boxStartPos.current[2], hoveredPos[2]) + (Math.max(boxStartPos.current[2], hoveredPos[2]) - Math.min(boxStartPos.current[2], hoveredPos[2])) / 2 + 0.5) * voxelSize,
+          ]}
+          scale={[
+            (Math.max(boxStartPos.current[0], hoveredPos[0]) - Math.min(boxStartPos.current[0], hoveredPos[0]) + 1) * voxelSize * 1.05,
+            (Math.max(boxStartPos.current[1], hoveredPos[1]) - Math.min(boxStartPos.current[1], hoveredPos[1]) + 1) * voxelSize * 1.05,
+            (Math.max(boxStartPos.current[2], hoveredPos[2]) - Math.min(boxStartPos.current[2], hoveredPos[2]) + 1) * voxelSize * 1.05,
+          ]}
+        >
+          <boxGeometry args={[1, 1, 1]} />
+          <meshBasicMaterial color={currentColor} transparent opacity={0.4} depthWrite={false} />
+        </mesh>
+      )}
+
+      {/* Hover ghost (only show if not drawing a box) */}
+      {hoveredPos && !(currentTool === 'box' && boxStartPos.current) && (
         <mesh
           // Scale and position consistent with real voxel rendering
           position={[
@@ -275,6 +406,26 @@ function VoxelMesh() {
           material={hoverMaterial}
           scale={[1.05 * voxelSize, 1.05 * voxelSize, 1.05 * voxelSize]}
         />
+      )}
+
+      {/* Visual Mirror Planes */}
+      {symmetry.x && (
+        <mesh position={[symmetryOffset.x * voxelSize, gridSize / 2, 0]}>
+          <boxGeometry args={[0.02, gridSize, gridSize * 2]} />
+          <meshBasicMaterial color="#ef4444" transparent opacity={0.15} depthWrite={false} />
+        </mesh>
+      )}
+      {symmetry.y && (
+        <mesh position={[0, symmetryOffset.y * voxelSize, 0]}>
+          <boxGeometry args={[gridSize * 2, 0.02, gridSize * 2]} />
+          <meshBasicMaterial color="#22c55e" transparent opacity={0.15} depthWrite={false} />
+        </mesh>
+      )}
+      {symmetry.z && (
+        <mesh position={[0, gridSize / 2, symmetryOffset.z * voxelSize]}>
+          <boxGeometry args={[gridSize * 2, gridSize, 0.02]} />
+          <meshBasicMaterial color="#3b82f6" transparent opacity={0.15} depthWrite={false} />
+        </mesh>
       )}
     </>
   );
@@ -318,6 +469,7 @@ function ReferenceObjects() {
 function Scene() {
   const { showGrid, gridSize, voxelSubdivision } = useVoxelStore();
   const voxelSize = 1 / voxelSubdivision;
+  const orbitRef = useRef<any>(null);
 
   return (
     <>
@@ -326,37 +478,41 @@ function Scene() {
       <directionalLight position={[10, 10, 5]} intensity={0.8} castShadow />
       <pointLight position={[-10, -10, -10]} intensity={0.4} />
 
-      <VoxelMesh />
+      <VoxelMesh orbitRef={orbitRef} />
       <ReferenceObjects />
 
       {showGrid && (
-        <Grid
-          args={[gridSize * 2, gridSize * 2]}
-          // Fine sub-grid: one cell per voxel slot
-          cellSize={voxelSize}
-          cellColor="#1e3a4a"
-          cellThickness={0.4}
-          // Coarse grid: one section per original grid square (1.0 world units)
-          sectionSize={1}
-          sectionColor="#2255aa"
-          sectionThickness={1.2}
-          fadeDistance={30}
-          fadeStrength={1.5}
-        />
+        <>
+          <axesHelper args={[gridSize * 1.5]} />
+          <Grid
+            args={[gridSize * 2, gridSize * 2]}
+            // Fine sub-grid: one cell per voxel slot
+            cellSize={voxelSize}
+            cellColor="#1e3a4a"
+            cellThickness={0.4}
+            // Coarse grid: one section per original grid square (1.0 world units)
+            sectionSize={1}
+            sectionColor="#2255aa"
+            sectionThickness={1.2}
+            fadeDistance={30}
+            fadeStrength={1.5}
+          />
+        </>
       )}
 
-        <OrbitControls
-          makeDefault
-          mouseButtons={{
-            LEFT: THREE.MOUSE.ROTATE,
-            MIDDLE: THREE.MOUSE.DOLLY,
-            RIGHT: THREE.MOUSE.PAN,
-          }}
-          autoRotate={false}
-          minDistance={0.5}
-          maxDistance={100}
-          enablePan={true}
-        />
+      <OrbitControls
+        ref={orbitRef}
+        makeDefault
+        mouseButtons={{
+          LEFT: THREE.MOUSE.ROTATE,
+          MIDDLE: THREE.MOUSE.DOLLY,
+          RIGHT: THREE.MOUSE.PAN,
+        }}
+        autoRotate={false}
+        minDistance={0.5}
+        maxDistance={100}
+        enablePan={true}
+      />
     </>
   );
 }

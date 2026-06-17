@@ -34,7 +34,7 @@ export interface Layer {
   voxels: Voxel[];
 }
 
-export type Tool = 'add' | 'remove' | 'paint' | 'select';
+export type Tool = 'add' | 'remove' | 'paint' | 'select' | 'box';
 
 /**
  * An imported reference mesh (STL / OBJ / GLB).
@@ -81,18 +81,33 @@ export interface VoxelEditorState {
   getLayerVoxels: (layerId: string) => Voxel[];
 
   // ── Voxels ────────────────────────────────────────────────────────────────
-  addVoxel: (voxel: Voxel, layerId?: string) => void;
-  removeVoxel: (x: number, y: number, z: number, layerId?: string) => void;
-  paintVoxel: (x: number, y: number, z: number, color: string, layerId?: string) => void;
+  addVoxel: (voxel: Voxel, layerId?: string, skipHistory?: boolean) => void;
+  batchAddVoxels: (voxels: Voxel[], layerId?: string) => void;
+  removeVoxel: (x: number, y: number, z: number, layerId?: string, skipHistory?: boolean) => void;
+  paintVoxel: (x: number, y: number, z: number, color: string, layerId?: string, skipHistory?: boolean) => void;
   getVoxelAt: (x: number, y: number, z: number, layerId?: string) => Voxel | undefined;
   /** Returns voxels from all *visible* layers combined. */
   getAllVoxels: () => Voxel[];
+
+  // ── History ───────────────────────────────────────────────────────────────
+  canUndo: boolean;
+  canRedo: boolean;
+  undo: () => void;
+  redo: () => void;
+  /** Call before starting a continuous interaction (e.g. drag-to-draw) so it is grouped as one undo step. */
+  beginInteraction: () => void;
 
   // ── Tools & Color ─────────────────────────────────────────────────────────
   currentColor: string;
   setCurrentColor: (color: string) => void;
   currentTool: Tool;
   setCurrentTool: (tool: Tool) => void;
+
+  // ── Mass Placement & Symmetry ─────────────────────────────────────────────
+  symmetry: { x: boolean; y: boolean; z: boolean };
+  setSymmetry: (axis: 'x' | 'y' | 'z', enabled: boolean) => void;
+  symmetryOffset: { x: number; y: number; z: number };
+  setSymmetryOffset: (axis: 'x' | 'y' | 'z', offset: number) => void;
 
   // ── History ───────────────────────────────────────────────────────────────
   canUndo: boolean;
@@ -142,7 +157,51 @@ interface Snapshot {
   voxelSubdivision: number;
   currentColor: string;
   currentTool: Tool;
+  symmetry: { x: boolean; y: boolean; z: boolean };
+  symmetryOffset: { x: number; y: number; z: number };
   showGrid: boolean;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Symmetry Helper
+// ══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Returns all mirrored coordinates for a given point based on the active symmetry axes.
+ * Mirroring occurs across the world origin (x=0, y=0, z=0).
+ * Since voxels occupy physical width, a voxel at x=0 spans from 0 to +w.
+ * Its mirror across x=0 is exactly x=-1 (which spans from -w to 0).
+ * Thus, the mirrored coordinate is always `-val - 1`.
+ */
+function getSymmetricPoints(
+  x: number,
+  y: number,
+  z: number,
+  sym: { x: boolean; y: boolean; z: boolean },
+  offset: { x: number; y: number; z: number }
+): [number, number, number][] {
+  const points: [number, number, number][] = [[x, y, z]];
+
+  if (sym.x) {
+    const len = points.length;
+    for (let i = 0; i < len; i++) {
+      points.push([2 * offset.x - points[i][0] - 1, points[i][1], points[i][2]]);
+    }
+  }
+  if (sym.y) {
+    const len = points.length;
+    for (let i = 0; i < len; i++) {
+      points.push([points[i][0], 2 * offset.y - points[i][1] - 1, points[i][2]]);
+    }
+  }
+  if (sym.z) {
+    const len = points.length;
+    for (let i = 0; i < len; i++) {
+      points.push([points[i][0], points[i][1], 2 * offset.z - points[i][2] - 1]);
+    }
+  }
+
+  return points;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -164,6 +223,8 @@ export const useVoxelStore = create<VoxelEditorState>()((set, get) => {
       voxelSubdivision: s.voxelSubdivision,
       currentColor: s.currentColor,
       currentTool: s.currentTool,
+      symmetry: { ...s.symmetry },
+      symmetryOffset: { ...s.symmetryOffset },
       showGrid: s.showGrid,
     };
   };
@@ -277,7 +338,7 @@ export const useVoxelStore = create<VoxelEditorState>()((set, get) => {
       get().layers.find((l) => l.id === layerId)?.voxels ?? [],
 
     // ── Voxels ──────────────────────────────────────────────────────────────
-    addVoxel: (voxel, layerId?) => {
+    addVoxel: (voxel, layerId?, skipHistory?) => {
       if (!isHexColor(voxel.color)) {
         warn('addVoxel', `"${voxel.color}" is not a valid hex color (e.g. "#FF0000").`);
         return;
@@ -285,34 +346,75 @@ export const useVoxelStore = create<VoxelEditorState>()((set, get) => {
       const targetId = resolveLayer(layerId);
       if (!targetId) { warn('addVoxel', 'No active layer to add to.'); return; }
 
-      saveToHistory();
+      if (!skipHistory) saveToHistory();
       set((s) => ({
         layers: s.layers.map((l) => {
           if (l.id !== targetId) return l;
-          // Skip if a voxel already exists at this position
-          const exists = l.voxels.some(
-            (v) => v.x === voxel.x && v.y === voxel.y && v.z === voxel.z
-          );
-          return exists ? l : { ...l, voxels: [...l.voxels, voxel] };
+
+          const points = getSymmetricPoints(voxel.x, voxel.y, voxel.z, s.symmetry, s.symmetryOffset);
+          let newVoxels = [...l.voxels];
+
+          for (const [px, py, pz] of points) {
+            const exists = newVoxels.some((v) => v.x === px && v.y === py && v.z === pz);
+            if (!exists) {
+              newVoxels.push({ x: px, y: py, z: pz, color: voxel.color });
+            }
+          }
+
+          return { ...l, voxels: newVoxels };
         }),
       }));
     },
 
-    removeVoxel: (x, y, z, layerId?) => {
+    batchAddVoxels: (voxelsToApply, layerId?) => {
       const targetId = resolveLayer(layerId);
-      if (!targetId) { warn('removeVoxel', 'No active layer.'); return; }
+      if (!targetId) { warn('batchAddVoxels', 'No active layer to add to.'); return; }
+      if (voxelsToApply.length === 0) return;
 
       saveToHistory();
       set((s) => ({
-        layers: s.layers.map((l) =>
-          l.id !== targetId
-            ? l
-            : { ...l, voxels: l.voxels.filter((v) => !(v.x === x && v.y === y && v.z === z)) }
-        ),
+        layers: s.layers.map((l) => {
+          if (l.id !== targetId) return l;
+
+          let newVoxels = [...l.voxels];
+          
+          for (const voxel of voxelsToApply) {
+            if (!isHexColor(voxel.color)) continue;
+            
+            const points = getSymmetricPoints(voxel.x, voxel.y, voxel.z, s.symmetry, s.symmetryOffset);
+            for (const [px, py, pz] of points) {
+              const exists = newVoxels.some((v) => v.x === px && v.y === py && v.z === pz);
+              if (!exists) {
+                newVoxels.push({ x: px, y: py, z: pz, color: voxel.color });
+              }
+            }
+          }
+
+          return { ...l, voxels: newVoxels };
+        }),
       }));
     },
 
-    paintVoxel: (x, y, z, color, layerId?) => {
+    removeVoxel: (x, y, z, layerId?, skipHistory?) => {
+      const targetId = resolveLayer(layerId);
+      if (!targetId) { warn('removeVoxel', 'No active layer.'); return; }
+
+      if (!skipHistory) saveToHistory();
+      set((s) => ({
+        layers: s.layers.map((l) => {
+          if (l.id !== targetId) return l;
+
+          const points = getSymmetricPoints(x, y, z, s.symmetry, s.symmetryOffset);
+          const newVoxels = l.voxels.filter(
+            (v) => !points.some(([px, py, pz]) => px === v.x && py === v.y && pz === v.z)
+          );
+
+          return { ...l, voxels: newVoxels };
+        }),
+      }));
+    },
+
+    paintVoxel: (x, y, z, color, layerId?, skipHistory?) => {
       if (!isHexColor(color)) {
         warn('paintVoxel', `"${color}" is not a valid hex color.`);
         return;
@@ -320,18 +422,24 @@ export const useVoxelStore = create<VoxelEditorState>()((set, get) => {
       const targetId = resolveLayer(layerId);
       if (!targetId) { warn('paintVoxel', 'No active layer.'); return; }
 
-      saveToHistory();
+      if (!skipHistory) saveToHistory();
       set((s) => ({
-        layers: s.layers.map((l) =>
-          l.id !== targetId
-            ? l
-            : {
-                ...l,
-                voxels: l.voxels.map((v) =>
-                  v.x === x && v.y === y && v.z === z ? { ...v, color } : v
-                ),
-              }
-        ),
+        layers: s.layers.map((l) => {
+          if (l.id !== targetId) return l;
+
+          const points = getSymmetricPoints(x, y, z, s.symmetry, s.symmetryOffset);
+          let changed = false;
+
+          const newVoxels = l.voxels.map((v) => {
+            if (points.some(([px, py, pz]) => px === v.x && py === v.y && pz === v.z)) {
+              changed = true;
+              return { ...v, color };
+            }
+            return v;
+          });
+
+          return changed ? { ...l, voxels: newVoxels } : l;
+        }),
       }));
     },
 
@@ -360,6 +468,18 @@ export const useVoxelStore = create<VoxelEditorState>()((set, get) => {
     currentTool: 'add',
     setCurrentTool: (tool) => set({ currentTool: tool }),
 
+    // ── Mass Placement & Symmetry ─────────────────────────────────────────────
+    symmetry: { x: false, y: false, z: false },
+    setSymmetry: (axis, enabled) => {
+      saveToHistory();
+      set((s) => ({ symmetry: { ...s.symmetry, [axis]: enabled } }));
+    },
+    symmetryOffset: { x: 0, y: 0, z: 0 },
+    setSymmetryOffset: (axis, offset) => {
+      saveToHistory();
+      set((s) => ({ symmetryOffset: { ...s.symmetryOffset, [axis]: offset } }));
+    },
+
     // ── History ──────────────────────────────────────────────────────────────
     canUndo: false,
     canRedo: false,
@@ -378,6 +498,10 @@ export const useVoxelStore = create<VoxelEditorState>()((set, get) => {
       const next = future.pop()!;
       set(next);
       syncFlags();
+    },
+
+    beginInteraction: () => {
+      saveToHistory();
     },
 
     // ── View ─────────────────────────────────────────────────────────────────
