@@ -29,18 +29,28 @@ function VoxelMesh({ orbitRef }: { orbitRef: React.MutableRefObject<any> }) {
 
   const [hoveredPos, setHoveredPos] = useState<[number, number, number] | null>(null);
 
+
   // Stable material — created once
   const material = useMemo(
     () =>
-      new THREE.MeshStandardMaterial({
+      new THREE.MeshLambertMaterial({
         color: '#ffffff',
         emissive: '#444444',
-        metalness: 0.3,
-        roughness: 0.4,
-        vertexColors: true,
       }),
     []
   );
+
+  // Ref callback: pre-initialize instanceColor buffer BEFORE first render
+  // so the Three.js shader compiles with USE_INSTANCING_COLOR support.
+  const meshRefCallback = useCallback((mesh: THREE.InstancedMesh | null) => {
+    meshRef.current = mesh;
+    if (mesh && !mesh.instanceColor) {
+      const colors = new Float32Array(250000 * 3).fill(1); // default white
+      mesh.instanceColor = new THREE.InstancedBufferAttribute(colors, 3);
+      mesh.instanceColor.needsUpdate = true;
+      mesh.count = 0; // no visible instances yet
+    }
+  }, []);
 
   const hoverMaterial = useMemo(
     () =>
@@ -374,14 +384,13 @@ function VoxelMesh({ orbitRef }: { orbitRef: React.MutableRefObject<any> }) {
       </mesh>
 
       {/* Actual voxels */}
-      {voxels.length > 0 && (
-        <instancedMesh
-          ref={meshRef}
-          args={[BOX_GEO, material, Math.max(voxels.length, 1)]}
-          castShadow
-          receiveShadow
-        />
-      )}
+      <instancedMesh
+        ref={meshRefCallback}
+        args={[BOX_GEO, material, 250000]}
+        castShadow
+        receiveShadow
+        frustumCulled={false}
+      />
 
       {/* Box Tool Ghost Preview */}
       {boxStartPos.current && hoveredPos && (
