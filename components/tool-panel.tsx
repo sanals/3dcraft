@@ -2,12 +2,13 @@
 
 import { useVoxelStore } from '@/lib/voxel-store';
 import { Button } from '@/components/ui/button';
-import { Plus, Trash2, Paintbrush, Pointer, BoxSelect } from 'lucide-react';
+import { Plus, Trash2, Paintbrush, Pointer, BoxSelect, PaintBucket, Route } from 'lucide-react';
 
 export function ToolPanel() {
   const {
     currentTool, setCurrentTool,
     currentColor, setCurrentColor,
+    continuousMode, setContinuousMode,
     symmetry, setSymmetry,
     symmetryOffset, setSymmetryOffset,
     clearAll
@@ -19,6 +20,7 @@ export function ToolPanel() {
     { id: 'paint', label: 'Paint', icon: Paintbrush },
     { id: 'select', label: 'Select', icon: Pointer },
     { id: 'box', label: 'Box', icon: BoxSelect },
+    { id: 'fill', label: 'Fill', icon: PaintBucket },
   ] as const;
 
   return (
@@ -43,6 +45,20 @@ export function ToolPanel() {
             );
           })}
         </div>
+      </div>
+
+      <div>
+        <h3 className="text-sm font-semibold text-white mb-3">Options</h3>
+        <Button
+          variant={continuousMode ? 'default' : 'outline'}
+          size="sm"
+          onClick={() => setContinuousMode(!continuousMode)}
+          className="flex items-center gap-2 w-full mb-4"
+          title="Drag to draw continuously"
+        >
+          <Route size={16} />
+          <span>Continuous Paint</span>
+        </Button>
       </div>
 
       <div>

@@ -17,8 +17,9 @@ function VoxelMesh({ orbitRef }: { orbitRef: React.MutableRefObject<any> }) {
 
   const {
     getAllVoxels, currentTool,
-    addVoxel, removeVoxel, paintVoxel, batchAddVoxels,
+    addVoxel, removeVoxel, paintVoxel, batchAddVoxels, fillVoxels,
     currentColor, gridSize, voxelSubdivision,
+    continuousMode,
     symmetry, symmetryOffset,
     beginInteraction
   } = useVoxelStore();
@@ -150,8 +151,8 @@ function VoxelMesh({ orbitRef }: { orbitRef: React.MutableRefObject<any> }) {
       // 2. Fall back: hit the ground plane
       if (groundPlaneRef.current) {
         // If we are removing or painting, we shouldn't target the ground plane.
-        // We only want to interact with empty ground space when adding.
-        if (currentTool !== 'add' && currentTool !== 'box') return null;
+        // We only want to interact with empty ground space when adding or filling.
+        if (currentTool !== 'add' && currentTool !== 'box' && currentTool !== 'fill') return null;
 
         const hits = raycaster.intersectObject(groundPlaneRef.current);
         if (hits.length > 0) {
@@ -201,9 +202,14 @@ function VoxelMesh({ orbitRef }: { orbitRef: React.MutableRefObject<any> }) {
         removeVoxel(x, y, z, undefined, skipHistory);
       } else if (currentTool === 'paint') {
         paintVoxel(x, y, z, currentColor, undefined, skipHistory);
+      } else if (currentTool === 'fill') {
+        // Only run fill on single clicks, drag-to-fill is too expensive
+        if (!skipHistory) {
+          fillVoxels(x, y, z, currentColor, undefined);
+        }
       }
     },
-    [computeHoverPos, currentTool, currentColor, addVoxel, removeVoxel, paintVoxel]
+    [computeHoverPos, currentTool, currentColor, addVoxel, removeVoxel, paintVoxel, fillVoxels]
   );
 
   // ── Pointer event handlers (attached to canvas DOM element) ────────────────
@@ -214,8 +220,11 @@ function VoxelMesh({ orbitRef }: { orbitRef: React.MutableRefObject<any> }) {
     const ndc = domToNDC(e);
     const pos = computeHoverPos(ndc);
     
+    // Ctrl+Drag acts as a shortcut for the Box tool
+    const isBoxTool = currentTool === 'box' || e.ctrlKey || e.metaKey;
+
     // Handle Box tool
-    if (currentTool === 'box') {
+    if (isBoxTool) {
       if (pos) {
         boxStartPos.current = pos;
         if (orbitRef.current) orbitRef.current.enabled = false;
@@ -229,7 +238,7 @@ function VoxelMesh({ orbitRef }: { orbitRef: React.MutableRefObject<any> }) {
     pointerDownPos.current = { x: e.clientX, y: e.clientY };
     isDragging.current = false;
 
-    if (e.ctrlKey || e.metaKey) {
+    if (continuousMode) {
       if (orbitRef.current) orbitRef.current.enabled = false;
       isDrawing.current = true;
       lastDrawnPos.current = null;
@@ -242,7 +251,7 @@ function VoxelMesh({ orbitRef }: { orbitRef: React.MutableRefObject<any> }) {
         gl.domElement.setPointerCapture(e.pointerId);
       }
     }
-  }, [beginInteraction, domToNDC, executeTool, gl.domElement, computeHoverPos, currentTool, orbitRef]);
+  }, [beginInteraction, domToNDC, executeTool, gl.domElement, computeHoverPos, currentTool, orbitRef, continuousMode]);
 
   const handlePointerMove = useCallback(
     (e: PointerEvent) => {
@@ -270,7 +279,7 @@ function VoxelMesh({ orbitRef }: { orbitRef: React.MutableRefObject<any> }) {
       if (e.button !== 0) return;
       
       // Handle Box tool completion
-      if (currentTool === 'box' && boxStartPos.current) {
+      if (boxStartPos.current) {
         const endPos = computeHoverPos(domToNDC(e)) || hoveredPos;
         if (endPos) {
           const [x1, y1, z1] = boxStartPos.current;
@@ -375,7 +384,7 @@ function VoxelMesh({ orbitRef }: { orbitRef: React.MutableRefObject<any> }) {
       )}
 
       {/* Box Tool Ghost Preview */}
-      {currentTool === 'box' && boxStartPos.current && hoveredPos && (
+      {boxStartPos.current && hoveredPos && (
         <mesh
           position={[
             (Math.min(boxStartPos.current[0], hoveredPos[0]) + (Math.max(boxStartPos.current[0], hoveredPos[0]) - Math.min(boxStartPos.current[0], hoveredPos[0])) / 2 + 0.5) * voxelSize,
@@ -394,7 +403,7 @@ function VoxelMesh({ orbitRef }: { orbitRef: React.MutableRefObject<any> }) {
       )}
 
       {/* Hover ghost (only show if not drawing a box) */}
-      {hoveredPos && !(currentTool === 'box' && boxStartPos.current) && (
+      {hoveredPos && !boxStartPos.current && (
         <mesh
           // Scale and position consistent with real voxel rendering
           position={[

@@ -34,7 +34,7 @@ export interface Layer {
   voxels: Voxel[];
 }
 
-export type Tool = 'add' | 'remove' | 'paint' | 'select' | 'box';
+export type Tool = 'add' | 'remove' | 'paint' | 'select' | 'box' | 'fill';
 
 /**
  * An imported reference mesh (STL / OBJ / GLB).
@@ -72,6 +72,12 @@ export interface VoxelEditorState {
   // ── Layers ────────────────────────────────────────────────────────────────
   layers: Layer[];
   activeLayerId: string | null;
+  setCurrentColor: (color: string) => void;
+  setGridSize: (size: number) => void;
+  setVoxelSubdivision: (sub: number) => void;
+  setShowGrid: (show: boolean) => void;
+  setContinuousMode: (mode: boolean) => void;
+  setSymmetry: (axis: 'x' | 'y' | 'z', value: boolean) => void;
   addLayer: (name: string) => void;
   removeLayer: (id: string) => void;
   setActiveLayer: (id: string) => void;
@@ -83,6 +89,7 @@ export interface VoxelEditorState {
   // ── Voxels ────────────────────────────────────────────────────────────────
   addVoxel: (voxel: Voxel, layerId?: string, skipHistory?: boolean) => void;
   batchAddVoxels: (voxels: Voxel[], layerId?: string) => void;
+  fillVoxels: (startX: number, startY: number, startZ: number, color: string, layerId?: string) => void;
   removeVoxel: (x: number, y: number, z: number, layerId?: string, skipHistory?: boolean) => void;
   paintVoxel: (x: number, y: number, z: number, color: string, layerId?: string, skipHistory?: boolean) => void;
   getVoxelAt: (x: number, y: number, z: number, layerId?: string) => Voxel | undefined;
@@ -99,25 +106,17 @@ export interface VoxelEditorState {
 
   // ── Tools & Color ─────────────────────────────────────────────────────────
   currentColor: string;
-  setCurrentColor: (color: string) => void;
   currentTool: Tool;
   setCurrentTool: (tool: Tool) => void;
 
   // ── Mass Placement & Symmetry ─────────────────────────────────────────────
+  continuousMode: boolean;
   symmetry: { x: boolean; y: boolean; z: boolean };
-  setSymmetry: (axis: 'x' | 'y' | 'z', enabled: boolean) => void;
   symmetryOffset: { x: number; y: number; z: number };
   setSymmetryOffset: (axis: 'x' | 'y' | 'z', offset: number) => void;
 
-  // ── History ───────────────────────────────────────────────────────────────
-  canUndo: boolean;
-  canRedo: boolean;
-  undo: () => void;
-  redo: () => void;
-
   // ── View ──────────────────────────────────────────────────────────────────
   showGrid: boolean;
-  setShowGrid: (show: boolean) => void;
 
   // ── Reference Objects ─────────────────────────────────────────────────────
   referenceObjects: ReferenceObject[];
@@ -157,6 +156,7 @@ interface Snapshot {
   voxelSubdivision: number;
   currentColor: string;
   currentTool: Tool;
+  continuousMode: boolean;
   symmetry: { x: boolean; y: boolean; z: boolean };
   symmetryOffset: { x: number; y: number; z: number };
   showGrid: boolean;
@@ -223,6 +223,7 @@ export const useVoxelStore = create<VoxelEditorState>()((set, get) => {
       voxelSubdivision: s.voxelSubdivision,
       currentColor: s.currentColor,
       currentTool: s.currentTool,
+      continuousMode: s.continuousMode,
       symmetry: { ...s.symmetry },
       symmetryOffset: { ...s.symmetryOffset },
       showGrid: s.showGrid,
@@ -395,6 +396,100 @@ export const useVoxelStore = create<VoxelEditorState>()((set, get) => {
       }));
     },
 
+    fillVoxels: (startX, startY, startZ, targetColor, layerId?) => {
+      const targetId = resolveLayer(layerId);
+      if (!targetId) return;
+
+      saveToHistory();
+      set((s) => ({
+        layers: s.layers.map((l) => {
+          if (l.id !== targetId) return l;
+
+          const voxelSet = new Map<string, Voxel>();
+          for (const v of l.voxels) {
+            voxelSet.set(`${v.x},${v.y},${v.z}`, v);
+          }
+
+          const startVoxel = voxelSet.get(`${startX},${startY},${startZ}`);
+          const isFillingEmpty = !startVoxel;
+          const matchColor = startVoxel ? startVoxel.color : null;
+          
+          if (!isFillingEmpty && matchColor === targetColor) return l; // nothing to do
+
+          const queue: [number, number, number][] = [];
+          const visited = new Set<string>();
+
+          // Get all symmetric starting points
+          const startingPoints = getSymmetricPoints(startX, startY, startZ, s.symmetry, s.symmetryOffset);
+          
+          for (const [px, py, pz] of startingPoints) {
+            const key = `${px},${py},${pz}`;
+            const v = voxelSet.get(key);
+            
+            if (isFillingEmpty && !v) {
+              queue.push([px, py, pz]);
+              visited.add(key);
+            } else if (!isFillingEmpty && v && v.color === matchColor) {
+              queue.push([px, py, pz]);
+              visited.add(key);
+            }
+          }
+
+          const newVoxelsToAdd: Voxel[] = [];
+          
+          // Limits to prevent browser crash
+          let iterations = 0;
+          const MAX_FILL = 25000;
+          const gs = s.gridSize;
+
+          while (queue.length > 0 && iterations < MAX_FILL) {
+            const [cx, cy, cz] = queue.shift()!;
+            iterations++;
+
+            if (isFillingEmpty) {
+              newVoxelsToAdd.push({ x: cx, y: cy, z: cz, color: targetColor });
+            } else {
+              const v = voxelSet.get(`${cx},${cy},${cz}`);
+              if (v) v.color = targetColor;
+            }
+
+            const neighbors = [
+              [cx+1, cy, cz], [cx-1, cy, cz],
+              [cx, cy+1, cz], [cx, cy-1, cz],
+              [cx, cy, cz+1], [cx, cy, cz-1]
+            ];
+
+            for (const [nx, ny, nz] of neighbors) {
+              // Bound check: keep within a reasonable working area
+              if (nx < -gs*2 || nx > gs*2 || ny < 0 || ny > gs*2 || nz < -gs*2 || nz > gs*2) continue;
+              
+              const key = `${nx},${ny},${nz}`;
+              if (visited.has(key)) continue;
+
+              const neighborVoxel = voxelSet.get(key);
+              if (isFillingEmpty) {
+                if (!neighborVoxel) {
+                  visited.add(key);
+                  queue.push([nx, ny, nz]);
+                }
+              } else {
+                if (neighborVoxel && neighborVoxel.color === matchColor) {
+                  visited.add(key);
+                  queue.push([nx, ny, nz]);
+                }
+              }
+            }
+          }
+
+          if (isFillingEmpty) {
+            return { ...l, voxels: [...l.voxels, ...newVoxelsToAdd] };
+          } else {
+            return { ...l, voxels: Array.from(voxelSet.values()) };
+          }
+        }),
+      }));
+    },
+
     removeVoxel: (x, y, z, layerId?, skipHistory?) => {
       const targetId = resolveLayer(layerId);
       if (!targetId) { warn('removeVoxel', 'No active layer.'); return; }
@@ -469,10 +564,12 @@ export const useVoxelStore = create<VoxelEditorState>()((set, get) => {
     setCurrentTool: (tool) => set({ currentTool: tool }),
 
     // ── Mass Placement & Symmetry ─────────────────────────────────────────────
+    continuousMode: false,
+    setContinuousMode: (mode) => set({ continuousMode: mode }),
     symmetry: { x: false, y: false, z: false },
-    setSymmetry: (axis, enabled) => {
+    setSymmetry: (axis, value) => {
       saveToHistory();
-      set((s) => ({ symmetry: { ...s.symmetry, [axis]: enabled } }));
+      set((s) => ({ symmetry: { ...s.symmetry, [axis]: value } }));
     },
     symmetryOffset: { x: 0, y: 0, z: 0 },
     setSymmetryOffset: (axis, offset) => {
