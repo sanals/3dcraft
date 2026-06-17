@@ -405,87 +405,66 @@ export const useVoxelStore = create<VoxelEditorState>()((set, get) => {
         layers: s.layers.map((l) => {
           if (l.id !== targetId) return l;
 
-          const voxelSet = new Map<string, Voxel>();
+          // Build a lookup map of positions → color
+          const colorAt = new Map<string, string>();
           for (const v of l.voxels) {
-            voxelSet.set(`${v.x},${v.y},${v.z}`, v);
+            colorAt.set(`${v.x},${v.y},${v.z}`, v.color);
           }
 
-          const startVoxel = voxelSet.get(`${startX},${startY},${startZ}`);
-          const isFillingEmpty = !startVoxel;
-          const matchColor = startVoxel ? startVoxel.color : null;
-          
-          if (!isFillingEmpty && matchColor === targetColor) return l; // nothing to do
+          const startKey = `${startX},${startY},${startZ}`;
+          const matchColor = colorAt.get(startKey);
+          // Only work on existing voxels — don't fill empty space
+          if (!matchColor) return l;
+          // Already the target color — nothing to do
+          if (matchColor === targetColor) return l;
 
+          // BFS to find all connected voxels with matchColor
+          const toRecolor = new Set<string>();
           const queue: [number, number, number][] = [];
-          const visited = new Set<string>();
 
-          // Get all symmetric starting points
+          // Seed with symmetric starting points
           const startingPoints = getSymmetricPoints(startX, startY, startZ, s.symmetry, s.symmetryOffset);
-          
           for (const [px, py, pz] of startingPoints) {
             const key = `${px},${py},${pz}`;
-            const v = voxelSet.get(key);
-            
-            if (isFillingEmpty && !v) {
+            if (colorAt.get(key) === matchColor && !toRecolor.has(key)) {
+              toRecolor.add(key);
               queue.push([px, py, pz]);
-              visited.add(key);
-            } else if (!isFillingEmpty && v && v.color === matchColor) {
-              queue.push([px, py, pz]);
-              visited.add(key);
             }
           }
 
-          const newVoxelsToAdd: Voxel[] = [];
-          
-          // Limits to prevent browser crash
-          let iterations = 0;
-          const MAX_FILL = 25000;
           const gs = s.gridSize;
+          const MAX_FILL = 250000;
 
-          while (queue.length > 0 && iterations < MAX_FILL) {
+          while (queue.length > 0 && toRecolor.size < MAX_FILL) {
             const [cx, cy, cz] = queue.shift()!;
-            iterations++;
 
-            if (isFillingEmpty) {
-              newVoxelsToAdd.push({ x: cx, y: cy, z: cz, color: targetColor });
-            } else {
-              const v = voxelSet.get(`${cx},${cy},${cz}`);
-              if (v) v.color = targetColor;
-            }
-
-            const neighbors = [
+            const neighbors: [number, number, number][] = [
               [cx+1, cy, cz], [cx-1, cy, cz],
               [cx, cy+1, cz], [cx, cy-1, cz],
-              [cx, cy, cz+1], [cx, cy, cz-1]
+              [cx, cy, cz+1], [cx, cy, cz-1],
             ];
 
             for (const [nx, ny, nz] of neighbors) {
-              // Bound check: keep within a reasonable working area
               if (nx < -gs*2 || nx > gs*2 || ny < 0 || ny > gs*2 || nz < -gs*2 || nz > gs*2) continue;
-              
               const key = `${nx},${ny},${nz}`;
-              if (visited.has(key)) continue;
-
-              const neighborVoxel = voxelSet.get(key);
-              if (isFillingEmpty) {
-                if (!neighborVoxel) {
-                  visited.add(key);
-                  queue.push([nx, ny, nz]);
-                }
-              } else {
-                if (neighborVoxel && neighborVoxel.color === matchColor) {
-                  visited.add(key);
-                  queue.push([nx, ny, nz]);
-                }
+              if (toRecolor.has(key)) continue;
+              if (colorAt.get(key) === matchColor) {
+                toRecolor.add(key);
+                queue.push([nx, ny, nz]);
               }
             }
           }
 
-          if (isFillingEmpty) {
-            return { ...l, voxels: [...l.voxels, ...newVoxelsToAdd] };
-          } else {
-            return { ...l, voxels: Array.from(voxelSet.values()) };
-          }
+          // Produce new immutable voxel array
+          const newVoxels = l.voxels.map((v) => {
+            const key = `${v.x},${v.y},${v.z}`;
+            if (toRecolor.has(key)) {
+              return { ...v, color: targetColor };
+            }
+            return v;
+          });
+
+          return { ...l, voxels: newVoxels };
         }),
       }));
     },

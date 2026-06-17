@@ -111,8 +111,9 @@ function VoxelMesh({ orbitRef }: { orbitRef: React.MutableRefObject<any> }) {
   // Update hover-ghost material color when tool or currentColor changes
   useEffect(() => {
     if (!hoverMaterial) return;
-    const c =
-      currentTool === 'remove' ? '#ff0000' : currentTool === 'paint' ? currentColor : '#00ff00';
+    let c = '#00ff00'; // default green for add/box/select
+    if (currentTool === 'remove') c = '#ff0000';
+    else if (currentTool === 'paint' || currentTool === 'fill') c = currentColor;
     hoverMaterial.color.set(c);
     hoverMaterial.emissive.set(c);
   }, [currentTool, currentColor, hoverMaterial]);
@@ -129,12 +130,13 @@ function VoxelMesh({ orbitRef }: { orbitRef: React.MutableRefObject<any> }) {
       // 1. Try hitting existing voxels first
       if (meshRef.current && voxels.length > 0) {
         const hits = raycaster.intersectObject(meshRef.current);
-        if (hits.length > 0) {
-          const hit = hits[0];
+        // Filter to only hits on REAL instances (not phantom pre-allocated slots)
+        const validHit = hits.find((h) => h.instanceId !== undefined && h.instanceId < voxels.length);
+        if (validHit) {
           // The face normal tells us which face was hit
-          const normal = hit.face?.normal ?? new THREE.Vector3(0, 1, 0);
+          const normal = validHit.face?.normal ?? new THREE.Vector3(0, 1, 0);
           // instanceId gives us the voxel
-          const idx = hit.instanceId ?? 0;
+          const idx = validHit.instanceId!;
           const matrix = new THREE.Matrix4();
           meshRef.current.getMatrixAt(idx, matrix);
           const renderPos = new THREE.Vector3().setFromMatrixPosition(matrix);
@@ -152,23 +154,17 @@ function VoxelMesh({ orbitRef }: { orbitRef: React.MutableRefObject<any> }) {
             if (ny >= 0) return [nx, ny, nz];
             return null;
           } else {
-            // Remove, Paint, or Select tools target the exact voxel intersected
+            // Remove, Paint, Fill, or Select tools target the exact voxel intersected
             return [storeX, storeY, storeZ];
           }
         }
       }
 
-      // 2. Fall back: hit the ground plane
+      // 2. Fall back: hit the ground plane (always, for visual hover feedback)
       if (groundPlaneRef.current) {
-        // If we are removing or painting, we shouldn't target the ground plane.
-        // We only want to interact with empty ground space when adding or filling.
-        if (currentTool !== 'add' && currentTool !== 'box' && currentTool !== 'fill') return null;
-
         const hits = raycaster.intersectObject(groundPlaneRef.current);
         if (hits.length > 0) {
           const p = hits[0].point;
-          // Divide by voxelSize then floor to snap to the correct voxel cell.
-          // With voxelSize=0.25: clicking at world x=0.6 → store x = floor(0.6/0.25) = floor(2.4) = 2
           return [
             Math.floor(p.x / voxelSize),
             0,
